@@ -4,3 +4,4 @@ requests
 websockets
 python-dotenv
 pydantic-settings
+google-genai

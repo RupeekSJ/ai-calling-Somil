@@ -23,9 +23,12 @@ class Settings(BaseSettings):
     exotel_api_key: str = os.getenv("EXOTEL_API_KEY", "")
     exotel_api_token: str = os.getenv("EXOTEL_API_TOKEN", "")
 
-    # --- NEW: Sarvam Config ---
+    # Sarvam Config (TTS/STT)
     sarvam_api_key: str = os.getenv("SARVAM_API_KEY", "")
     
+    # --- NEW: Gemini Config (LLM) ---
+    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
+
     # Validation
     def validate(self):
         if not self.exotel_api_key:
@@ -33,7 +36,8 @@ class Settings(BaseSettings):
         if not self.exotel_api_token:
             raise ValueError("EXOTEL_API_TOKEN is missing")
         if not self.sarvam_api_key:
-            # We warn but don't crash yet, in case you are still setting it up
             print("WARNING: SARVAM_API_KEY is missing")
+        if not self.gemini_api_key:
+            print("WARNING: GEMINI_API_KEY is missing")
 
 settings = Settings()
