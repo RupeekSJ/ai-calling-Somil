@@ -1,14 +1,18 @@
 import base64
 import json
 import logging
-from typing import Any, Dict, Optional
+import asyncio
+import requests
+from typing import Any, Dict
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
 
 from config import settings
 from dialer import make_outbound_call
 
+# Setup Logging
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -16,130 +20,125 @@ logging.basicConfig(
 log = logging.getLogger("voicebot")
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- Sarvam TTS Helper ---
+def generate_sarvam_tts(text: str) -> str:
+    """Generates TTS audio from Sarvam and returns Base64 string."""
+    if not settings.sarvam_api_key:
+        log.warning("SARVAM_API_KEY missing, skipping TTS.")
+        return None
+
+    url = "https://api.sarvam.ai/text-to-speech"
+    headers = {
+        "api-subscription-key": settings.sarvam_api_key,
+        "Content-Type": "application/json"
+    }
+    # Sarvam Payload: Adjust 'speech_sample_rate' to 8000 for Exotel if needed
+    payload = {
+        "inputs": [text],
+        "target_language_code": "hi-IN", # Hindi (or en-IN)
+        "speaker": "meera",
+        "pitch": 0,
+        "pace": 1.0,
+        "loudness": 1.5,
+        "speech_sample_rate": 8000, 
+        "enable_preprocessing": True,
+        "model": "bulbul:v1"
+    }
+    
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        if "audios" in data and len(data["audios"]) > 0:
+            return data["audios"][0]
+    except Exception as e:
+        log.error(f"Sarvam TTS Error: {e}")
+        return None
+
+# --- Routes ---
 
 @app.get("/")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "service": "rupeek-voicebot"}
 
-# -------- Exotel Voicebot Handshake (Dynamic URL) --------
-# Exotel expects: { "url": "wss://...." } when you configure an https endpoint. [web:67]
 @app.api_route("/exotel/voicebot", methods=["GET", "POST"])
 async def exotel_voicebot(request: Request):
+    """Handshake endpoint for Exotel Voicebot."""
     if request.method == "GET":
-        return JSONResponse({"status": "ok", "message": "voicebot endpoint reachable"})
+        return JSONResponse({"status": "ok"})
 
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = None
-
-    if payload is not None:
-        log.info("Exotel handshake payload: %s", json.dumps(payload, ensure_ascii=False)[:2000])
-    else:
-        log.warning("Exotel handshake: non-JSON payload")
-
-    # Keep params short (Exotel has limits), so only pass what you need.
-    # Also: hostname should be your PUBLIC domain (TLS), not request.url.hostname (can be internal). [web:67]
-    wss_url = f"wss://{settings.public_hostname}/ws"
+    # Exotel requires us to return the WebSocket URL
+    # Clean the hostname (remove http/https)
+    host = settings.public_hostname.replace("https://", "").replace("http://", "").strip("/")
+    wss_url = f"wss://{host}/ws"
+    
+    log.info(f"Handshake received. Returning WSS URL: {wss_url}")
     return JSONResponse({"url": wss_url})
 
-# -------- Optional: ExoML file (example placeholder) --------
-# You can serve ExoML from here OR from Exotel dashboard.
-# This is a placeholder; you must configure Voicebot applet in your ExoML/Flow.
-@app.get("/exoml/outbound.xml")
-async def outbound_exoml():
-    # Keep it simple: return something valid so Exotel can fetch.
-    # Replace with a real flow that includes Voicebot applet in Exotel.
-    xml = """<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say>Connecting you to Rupeek voice assistant.</Say>
-  <!-- Configure Voicebot applet in Exotel Flow/ExoML as per Exotel docs -->
-  <Hangup/>
-</Response>
-"""
-    return Response(content=xml, media_type="application/xml")
-
-# -------- Outbound dial endpoint (recommended) --------
 @app.post("/dial")
 async def dial(body: Dict[str, Any]):
-    """
-    POST /dial
-    {
-      "to": "+91....",
-      "from": "0....",
-      "exoml_url": "https://....../exoml/outbound.xml"
-    }
-    """
+    """Trigger an outbound call."""
     to_number = body.get("to") or settings.exotel_to_number
     from_number = body.get("from") or settings.exotel_from_number
     exoml_url = body.get("exoml_url") or settings.exotel_exoml_url
 
-    result = make_outbound_call(
-        to_number=to_number,
-        from_number=from_number,
-        exoml_url=exoml_url,
-    )
-    return {"ok": True, "exotel": result}
+    try:
+        result = make_outbound_call(
+            to_number=to_number,
+            from_number=from_number,
+            exoml_url=exoml_url,
+        )
+        return {"ok": True, "exotel": result}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
-# -------- WebSocket: receive Exotel events --------
-# Exotel sends JSON strings with events like Connected/Start/Media/DTMF/Stop. [web:67]
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
+    """WebSocket handler for real-time audio stream."""
     await ws.accept()
-    log.info("WS connected")
+    log.info("🔌 WS Connected to Exotel")
 
-    # For debugging: store raw audio bytes
-    audio_bytes = bytearray()
+    # 1. Greet the user immediately
+    greeting_text = "Namaste. Welcome to Rupeek. How can I assist you?"
+    audio_b64 = generate_sarvam_tts(greeting_text)
+    
+    if audio_b64:
+        # Exotel format: {"event": "media", "media": {"payload": "base64", "content_type": "audio/wav"}}
+        # Note: Check if Sarvam sends WAV or PCM. Exotel often handles WAV header automatically.
+        await ws.send_json({
+            "event": "media",
+            "media": {
+                "payload": audio_b64,
+                "content_type": "audio/wav"
+            }
+        })
+        log.info("Sent greeting audio")
 
+    # 2. Listen loop
     try:
         while True:
             msg_text = await ws.receive_text()
-            try:
-                evt = json.loads(msg_text)
-            except Exception:
-                log.warning("WS received non-JSON text: %s", msg_text[:200])
-                continue
+            data = json.loads(msg_text)
+            event_type = data.get("event")
 
-            event_type = (evt.get("event") or evt.get("type") or "").lower()
-
-            if event_type in ("connected",):
-                log.info("WS event: connected")
-
-            elif event_type in ("start",):
-                log.info("WS event: start | %s", json.dumps(evt, ensure_ascii=False)[:1000])
-
-            elif event_type in ("dtmf",):
-                log.info("WS event: dtmf | %s", json.dumps(evt, ensure_ascii=False)[:500])
-
-            elif event_type in ("media",):
-                media = evt.get("media") or {}
-                b64 = media.get("payload")
-                if b64:
-                    chunk = base64.b64decode(b64)
-                    audio_bytes.extend(chunk)
-                if len(audio_bytes) and (len(audio_bytes) % (32000 * 5) == 0):
-                    # periodic progress log (roughly depends on codec/chunking)
-                    log.info("Collected audio bytes: %d", len(audio_bytes))
-
-            elif event_type in ("stop",):
-                log.info("WS event: stop | audio_bytes=%d", len(audio_bytes))
+            if event_type == "media":
+                # User audio (base64)
+                # payload = data['media']['payload']
+                # TODO: Accumulate this payload and send to STT when silence is detected
+                pass
+            
+            elif event_type == "stop":
+                log.info("Call stopped by user/Exotel")
                 break
-
-            else:
-                log.info("WS event: %s", json.dumps(evt, ensure_ascii=False)[:800])
-
+                
     except WebSocketDisconnect:
-        log.warning("WS disconnected")
+        log.info("WS Disconnected")
     except Exception as e:
-        log.exception("WS error: %s", e)
-    finally:
-        # write debug audio to disk (raw PCM most likely); later we’ll decode properly.
-        try:
-            with open("debug_audio.raw", "wb") as f:
-                f.write(audio_bytes)
-            log.info("Saved debug_audio.raw (%d bytes)", len(audio_bytes))
-        except Exception as e:
-            log.warning("Could not save debug audio: %s", e)
-
-        await ws.close()
-        log.info("WS closed")
+        log.error(f"WS Error: {e}")
