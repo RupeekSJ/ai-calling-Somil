@@ -1,6 +1,10 @@
 import requests
 from requests.auth import HTTPBasicAuth
 from config import settings
+import logging
+
+# Initialize logger
+log = logging.getLogger("voicebot")
 
 def make_outbound_call(
     to_number: str,
@@ -25,11 +29,25 @@ def make_outbound_call(
         "Url": exoml_url,
     }
 
-    resp = requests.post(
-        url,
-        data=payload,
-        auth=HTTPBasicAuth(settings.exotel_api_key, settings.exotel_api_token),
-        timeout=20,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    log.info(f"Initiating Exotel call: URL={url}, Payload={payload}")
+
+    try:
+        resp = requests.post(
+            url,
+            data=payload,
+            auth=HTTPBasicAuth(settings.exotel_api_key, settings.exotel_api_token),
+            timeout=20,
+        )
+        
+        # --- DEBUG BLOCK ---
+        if not resp.ok:
+            log.error(f"❌ EXOTEL ERROR: {resp.status_code} - {resp.text}")
+            print(f"❌ EXOTEL ERROR: {resp.status_code} - {resp.text}") # Force print to stdout for Render logs
+        # -------------------
+
+        resp.raise_for_status()
+        return resp.json()
+
+    except Exception as e:
+        log.error(f"Failed to make outbound call: {e}")
+        raise
