@@ -6,7 +6,6 @@ import requests
 from typing import Any, Dict
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-# 👇 FIXED: Added JSONResponse import
 from fastapi.responses import JSONResponse, Response 
 from fastapi.middleware.cors import CORSMiddleware
 from config import settings
@@ -41,7 +40,7 @@ def generate_sarvam_tts(text: str) -> str:
     }
     payload = {
         "inputs": [text],
-        "target_language_code": "hi-IN",
+        "target_language_code": "en-IN",
         "speaker": "meera",
         "pitch": 0,
         "pace": 1.0,
