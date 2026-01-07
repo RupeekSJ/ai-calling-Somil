@@ -13,9 +13,12 @@ logger = logging.getLogger("voicebot")
 
 app = FastAPI()
 
-@app.get("/")
-async def root():
-    return {"message": "Voicebot is running!"}
+# Change this part in app.py
+
+@app.api_route("/", methods=["GET", "HEAD"])
+async def health(request: Request):
+    return JSONResponse({"status": "ok", "service": "rupeek-voicebot"})
+
 
 @app.get("/exotel/voicebot")
 @app.post("/exotel/voicebot")
