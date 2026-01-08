@@ -1,4 +1,4 @@
-print("🚀 STARTING SERVER V4 - EXOTEL CONNECT.JSON (FINAL)")
+print("🚀 STARTING SERVER V4.3 - EXOTEL CONNECT.JSON (STABLE)")
 
 import os
 import logging
@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 # --------------------------------------------------
 load_dotenv()
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
@@ -45,7 +45,7 @@ logger.info(f"EXOTEL_FROM_NUMBER = {EXOTEL_FROM_NUMBER}")
 # --------------------------------------------------
 # APP
 # --------------------------------------------------
-app = FastAPI(title="Rupeek VoiceBot", version="4.2")
+app = FastAPI(title="Rupeek VoiceBot", version="4.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -58,7 +58,7 @@ app.add_middleware(
 # MODELS
 # --------------------------------------------------
 class DialRequest(BaseModel):
-    from_: str = Field(..., alias="from")  # USER PHONE NUMBER
+    from_: str = Field(..., alias="from")  # USER PHONE NUMBER (+91...)
 
 
 # --------------------------------------------------
@@ -81,7 +81,7 @@ async def debug():
 
 
 # --------------------------------------------------
-# EXOML
+# EXOML (CRITICAL FIXED)
 # --------------------------------------------------
 @app.get("/exoml")
 @app.post("/exoml")
@@ -90,22 +90,33 @@ async def exoml():
 
     xml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Speak language="en-IN">
+
+    <Say language="en-IN">
         Namaste. Welcome to Rupeek gold loans.
-    </Speak>
+    </Say>
+
     <Pause length="1"/>
-    <Speak language="en-IN">
+
+    <Say language="en-IN">
         We offer instant gold loans up to seventy five percent of your gold value.
-    </Speak>
+    </Say>
+
     <Pause length="1"/>
-    <Speak language="en-IN">
-        Press 1 for more details or hang up to end this call.
-    </Speak>
-    <Gather
-        action="https://ai-calling-somil.onrender.com/collect"
-        inputTimeout="5"
-        finishOnKey="#"
-    />
+
+    <Gather action="https://ai-calling-somil.onrender.com/collect"
+            timeout="10"
+            finishOnKey="#">
+        <Say language="en-IN">
+            Press 1 for more details.
+        </Say>
+    </Gather>
+
+    <Pause length="5"/>
+
+    <Say language="en-IN">
+        We did not receive your input. Please try again later. Goodbye.
+    </Say>
+
 </Response>
 """
     return Response(content=xml, media_type="application/xml")
@@ -118,16 +129,16 @@ async def collect(request: Request):
 
     xml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Speak language="en-IN">
+    <Say language="en-IN">
         Thank you. Our team will contact you shortly. Goodbye.
-    </Speak>
+    </Say>
 </Response>
 """
     return Response(content=xml, media_type="application/xml")
 
 
 # --------------------------------------------------
-# DIAL (Exotel connect.json)
+# DIAL (Exotel connect.json — CORRECT)
 # --------------------------------------------------
 @app.post("/dial")
 async def dial(request: DialRequest):
@@ -155,8 +166,8 @@ async def dial(request: DialRequest):
     url = f"https://api.exotel.com/v1/Accounts/{EXOTEL_SID}/Calls/connect.json"
 
     payload = {
-        "From": request.from_,          # USER number
-        "CallerId": EXOTEL_FROM_NUMBER, # EXOTEL number
+        "From": request.from_,           # USER NUMBER
+        "CallerId": EXOTEL_FROM_NUMBER,  # EXOTEL VIRTUAL NUMBER
         "Url": f"{PUBLIC_HOSTNAME}/exoml",
     }
 
@@ -183,9 +194,10 @@ async def dial(request: DialRequest):
             )
 
         data = resp.json()
+
         call_sid = (
-            data.get("CallSid")
-            or data.get("call", {}).get("sid")
+            data.get("Call", {}).get("Sid")
+            or data.get("CallSid")
             or "UNKNOWN"
         )
 
@@ -217,5 +229,4 @@ async def ws(ws: WebSocket):
 # --------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)
