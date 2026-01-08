@@ -134,40 +134,45 @@ async def collect_input(request: Request):
 async def dial(request: DialRequest):
     logger.info(f"📞 Dial: FROM={request.from_ or EXOTEL_FROM_NUMBER} TO={request.to}")
     
-    missing = []
-    if not EXOTEL_SID: missing.append("EXOTEL_ACCOUNT_SID")
-    if not EXOTEL_API_KEY: missing.append("EXOTEL_API_KEY") 
-    if not EXOTEL_API_TOKEN: missing.append("EXOTEL_API_TOKEN")
+    # ✅ LOG ALL CREDS FOR DEBUG
+    logger.info(f"🔑 SID={EXOTEL_SID}, API_KEY={bool(EXOTEL_API_KEY)}, API_TOKEN={bool(EXOTEL_API_TOKEN)}")
     
-    if missing:
-        logger.error(f"❌ Missing: {missing}")
-        return JSONResponse({"error": f"Missing: {', '.join(missing)}"}, status_code=500)
-
-    # ✅ FIXED ENDPOINT + AUTH + PAYLOAD
-    url = f"https://api.exotel.com/v1/Accounts/{EXOTEL_SID}/Calls.json"
-    
+    url = "https://api.exotel.com/v1/Accounts/{EXOTEL_SID}/Calls.json".format(EXOTEL_SID=EXOTEL_SID)
     payload = {
-        "From": request.from_ or EXOTEL_FROM_NUMBER,  # USER: +917999796548
-        "To": request.to,                             # EXOTEL: 08069489493
-        "Url": f"https://ai-calling-somil.onrender.com/exoml",
-        "StatusCallback": f"https://ai-calling-somil.onrender.com/status",
-        "CallType": "trans"
+        "From": request.from_ or EXOTEL_FROM_NUMBER,  # +917999796548 (USER)
+        "To": request.to,                             # 08069489493 (EXOTEL)
+        "Url": "https://ai-calling-somil.onrender.com/exoml",
+        "StatusCallback": "https://ai-calling-somil.onrender.com/status"
     }
     
-    # ✅ FIXED AUTH (SID:Token)
-    auth = (EXOTEL_SID, EXOTEL_API_KEY)  # NOT API_KEY:API_TOKEN
+    # 🔥 EXOTEL AUTH = (SID, API_KEY) - NOT API_TOKEN!
+    auth = (EXOTEL_SID, EXOTEL_API_KEY)  
     
     try:
         resp = requests.post(url, auth=auth, data=payload, timeout=10)
-        logger.info(f"🔍 Exotel Raw Response: {resp.status_code} {resp.text[:300]}")
-        resp.raise_for_status()
+        logger.info(f"🔍 DEBUG: Status={resp.status_code}, Response={resp.text[:400]}")
+        
+        if resp.status_code != 200:
+            logger.error(f"❌ EXOTEL ERROR {resp.status_code}: {resp.text}")
+            return JSONResponse({"error": f"Exotel {resp.status_code}", "response": resp.text}, status_code=500)
+            
         result = resp.json()
-        call_sid = result.get("CallSid") or result.get("call", {}).get("CallSid")
+        call_sid = result.get("CallSid") or result.get("call", {}).get("CallSid", "UNKNOWN")
         logger.info(f"✅ Dial SUCCESS: CallSid={call_sid}")
         return {"status": "success", "call_sid": call_sid}
+        
     except Exception as e:
-        logger.error(f"❌ Dial failed: {e} | Response: {resp.text[:500]}")
+        logger.error(f"❌ Dial failed: {e}")
         return JSONResponse({"status": "error", "details": str(e)}, status_code=500)
+@app.get("/creds")
+async def debug_creds():
+    return {
+        "sid": EXOTEL_SID,
+        "api_key_exists": bool(EXOTEL_API_KEY),
+        "api_token_exists": bool(EXOTEL_API_TOKEN),
+        "from_number": EXOTEL_FROM_NUMBER,
+        "correct_auth": "(SID, API_KEY)"
+    }
 
 
 # --- WebSocket (DISABLED for fallback testing) ---
