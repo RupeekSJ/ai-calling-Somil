@@ -1,32 +1,36 @@
-print("🚀 STARTING SERVER - HAS DIAL ENDPOINT V1")
+print("🚀 STARTING SERVER - HAS DIAL ENDPOINT V2 (FINAL)")
 
 import os
 import json
 import base64
 import logging
-import asyncio
 import tempfile
 import wave
 import requests
-import g711  # Library to convert phone audio (ulaw) to PCM
-from typing import Any, Dict
-
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+import g711  # pip install g711
+from typing import Optional
+from fastapi import FastAPI, WebSocket, Request, Response
+from fastapi.websockets import WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from dotenv import load_dotenv
 
 # --- Configuration ---
 load_dotenv()
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
-PUBLIC_HOSTNAME = os.getenv("PUBLIC_HOSTNAME") # e.g. "ai-calling-somil.onrender.com"
+PUBLIC_HOSTNAME = os.getenv("PUBLIC_HOSTNAME")
+
+# Exotel Credentials
+EXOTEL_SID = os.getenv("EXOTEL_SID")
+EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
+EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
+EXOTEL_SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com")
+EXOTEL_FROM_NUMBER = os.getenv("EXOTEL_FROM_NUMBER")
 
 # Setup Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
-log = logging.getLogger("voicebot")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logger = logging.getLogger("voicebot")
 
 app = FastAPI()
 
@@ -37,82 +41,66 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 1. Sarvam TTS (Text -> Audio) ---
-def generate_sarvam_tts(text: str) -> str:
-    """Generates TTS audio from Sarvam and returns Base64 string."""
-    if not SARVAM_API_KEY:
-        log.error("❌ Sarvam API Key missing")
-        return None
+# --- Data Models ---
+class DialRequest(BaseModel):
+    to: str
+    from_: Optional[str] = None
+    exoml_url: Optional[str] = None
+    class Config:
+        fields = {'from_': 'from'}
 
+# --- Helper Functions ---
+def generate_sarvam_tts(text: str) -> str:
+    if not SARVAM_API_KEY:
+        logger.error("❌ Sarvam API Key missing")
+        return None
     url = "https://api.sarvam.ai/text-to-speech"
-    headers = {
-        "api-subscription-key": SARVAM_API_KEY,
-        "Content-Type": "application/json"
-    }
-    # Exotel requires 8000Hz. Sarvam handles this via 'speech_sample_rate'.
+    headers = {"api-subscription-key": SARVAM_API_KEY, "Content-Type": "application/json"}
     payload = {
         "inputs": [text],
-        "target_language_code": "en-IN", # or hi-IN
+        "target_language_code": "en-IN",
         "speaker": "meera",
-        "pitch": 0,
-        "pace": 1.0,
-        "loudness": 1.5,
         "speech_sample_rate": 8000, 
-        "enable_preprocessing": True,
         "model": "bulbul:v1"
     }
     try:
-        log.info(f"🗣️ Generating TTS: '{text}'")
+        logger.info(f"🗣️ TTS: '{text}'")
         resp = requests.post(url, headers=headers, json=payload, timeout=5)
         resp.raise_for_status()
         data = resp.json()
         if "audios" in data and len(data["audios"]) > 0:
             return data["audios"][0]
     except Exception as e:
-        log.error(f"❌ Sarvam TTS Error: {e}")
+        logger.error(f"❌ TTS Error: {e}")
     return None
 
-# --- 2. Sarvam STT (Audio -> Text) ---
 def transcribe_sarvam_stt(audio_bytes: bytes) -> str:
-    """
-    Saves raw PCM bytes to a WAV file and uploads to Sarvam STT.
-    """
     if not SARVAM_API_KEY or not audio_bytes:
         return ""
-
     tmp_filename = None
     try:
-        # Save buffer to a temporary WAV file with correct headers
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
             tmp_filename = tmp_wav.name
             with wave.open(tmp_filename, "wb") as wf:
-                wf.setnchannels(1)       # Mono
-                wf.setsampwidth(2)       # 16-bit PCM
-                wf.setframerate(8000)    # 8kHz (standard telephony)
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(8000)
                 wf.writeframes(audio_bytes)
-
-        # Upload to Sarvam
         url = "https://api.sarvam.ai/speech-to-text"
         headers = {"api-subscription-key": SARVAM_API_KEY}
-        
         with open(tmp_filename, "rb") as f:
             files = {'file': ('audio.wav', f, 'audio/wav')}
-            data = {"model": "saarika:v1", "language_code": "en-IN"} # use saarika:v2.5 if available
-            
+            data = {"model": "saarika:v1", "language_code": "en-IN"}
             resp = requests.post(url, headers=headers, files=files, data=data, timeout=8)
-            
         if resp.status_code == 200:
-            transcript = resp.json().get("transcript", "").strip()
-            return transcript
+            return resp.json().get("transcript", "").strip()
         else:
-            log.error(f"❌ STT API Failed: {resp.text}")
+            logger.error(f"❌ STT Error: {resp.text}")
             return ""
-
     except Exception as e:
-        log.error(f"❌ Sarvam STT Exception: {e}")
+        logger.error(f"❌ STT Exception: {e}")
         return ""
     finally:
-        # Cleanup temp file
         if tmp_filename and os.path.exists(tmp_filename):
             os.remove(tmp_filename)
 
@@ -120,45 +108,71 @@ def transcribe_sarvam_stt(audio_bytes: bytes) -> str:
 
 @app.get("/")
 async def health():
-    return {"status": "ok", "service": "sarvam-exotel-voicebot"}
+    return {"status": "ok", "service": "sarvam-exotel-voicebot-v3-dial"}
 
-@app.api_route("/exotel/voicebot", methods=["GET", "POST"])
-async def exotel_handshake(request: Request):
-    """Exotel calls this to get the WebSocket URL."""
-    # Dynamically get the host to avoid config errors
+@app.get("/exoml")
+@app.post("/exoml")
+async def get_exoml(request: Request):
+    """Instructions for Exotel to connect to WebSocket"""
     host = request.headers.get("host") or PUBLIC_HOSTNAME
     host = host.replace("http://", "").replace("https://", "").strip("/")
-    
     wss_url = f"wss://{host}/ws"
-    log.info(f"🤝 Handshake. Returning: {wss_url}")
-    return JSONResponse({"url": wss_url})
+    xml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="{wss_url}">
+            <Parameter name="packetS" value="true" />
+        </Stream>
+    </Connect>
+</Response>"""
+    return Response(content=xml_content, media_type="application/xml")
 
-# --- WebSocket Logic ---
+@app.post("/dial")
+async def dial(request: DialRequest):
+    """Triggers outbound call"""
+    if not (EXOTEL_SID and EXOTEL_API_KEY and EXOTEL_API_TOKEN):
+        return JSONResponse({"error": "Exotel credentials missing"}, status_code=500)
+
+    url = f"https://{EXOTEL_API_KEY}:{EXOTEL_API_TOKEN}@{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/connect.json"
+    
+    # Construct callback URL (Where Exotel asks 'what do I do?')
+    host = PUBLIC_HOSTNAME or "ai-calling-somil.onrender.com"
+    if not host.startswith("http"):
+        host = f"https://{host}"
+    
+    # We point Exotel to our /exoml endpoint, which tells it to open the WebSocket
+    callback_url = request.exoml_url or f"{host}/exoml"
+
+    payload = {
+        "From": request.from_ or EXOTEL_FROM_NUMBER,
+        "To": request.to,
+        "Url": callback_url,
+        "CallType": "trans"
+    }
+    
+    logger.info(f"📞 Dialing {request.to} -> Callback: {callback_url}")
+    try:
+        resp = requests.post(url, data=payload)
+        resp.raise_for_status()
+        return {"status": "success", "exotel": resp.json()}
+    except Exception as e:
+        logger.error(f"Dial Failed: {e}")
+        return JSONResponse({"status": "error", "details": str(e)}, status_code=500)
+
+# --- WebSocket ---
 
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
     await ws.accept()
-    log.info("🔌 WS Connected")
+    logger.info("✅ WS Connected")
     
-    # 1. Initial Greeting
-    greeting = "Namaste. I am your AI assistant. How can I help you today?"
+    greeting = "Namaste. I am your Rupeek assistant. How can I help you today?"
     audio_b64 = generate_sarvam_tts(greeting)
-    
     if audio_b64:
-        await ws.send_json({
-            "event": "media",
-            "media": {
-                "payload": audio_b64,
-                "content_type": "audio/wav" # Sarvam sends WAV
-            }
-        })
-        log.info("📤 Sent greeting")
+        await ws.send_json({"event": "media", "media": {"payload": audio_b64, "content_type": "audio/wav"}})
 
-    # Audio State
     audio_buffer = bytearray()
     chunk_count = 0
-    # Tune this: 50 chunks * 20ms = ~1 second of audio. 
-    # Increase to 100-150 for longer listening window (2-3s).
     BUFFER_LIMIT = 80 
 
     try:
@@ -168,59 +182,28 @@ async def ws_handler(ws: WebSocket):
             event_type = data.get("event")
 
             if event_type == "media":
-                # 2. Receive Audio from Exotel
-                payload_b64 = data['media']['payload']
-                mulaw_chunk = base64.b64decode(payload_b64)
-                
-                # 3. Convert Mu-Law (Phone) -> PCM (AI)
-                # Exotel sends Mu-Law. Sarvam STT needs PCM 16-bit.
-                pcm_chunk = g711.decode_ulaw(mulaw_chunk)
-                
+                payload = base64.b64decode(data['media']['payload'])
+                pcm_chunk = g711.decode_ulaw(payload)
                 audio_buffer.extend(pcm_chunk)
                 chunk_count += 1
                 
-                # 4. Naive "Silence/End of Speech" Detection
-                # Real systems use WebRTC VAD. Here we just process every X seconds.
                 if chunk_count >= BUFFER_LIMIT:
-                    log.info("⏳ Processing audio buffer...")
-                    
-                    # A. Clear Exotel's buffer so user doesn't hear echo/delay
-                    await ws.send_json({"event": "clear"})
-                    
-                    # B. Get Transcript
+                    logger.info("⏳ Processing Speech...")
+                    await ws.send_json({"event": "clear"}) 
                     user_text = transcribe_sarvam_stt(bytes(audio_buffer))
-                    log.info(f"🎤 User Said: '{user_text}'")
-                    
+                    logger.info(f"🎤 User: {user_text}")
                     if user_text:
-                        # C. Simple Brain/Logic
-                        response_text = ""
-                        ut = user_text.lower()
+                        # Simple Logic
+                        reply = "I heard you."
+                        if "loan" in user_text.lower(): reply = "We offer gold loans."
                         
-                        if "loan" in ut or "money" in ut:
-                            response_text = "We offer gold loans at great rates. Are you interested?"
-                        elif "yes" in ut or "sure" in ut:
-                            response_text = "Great! Someone from our team will call you shortly."
-                        elif "bye" in ut:
-                            response_text = "Goodbye! Have a nice day."
-                            
-                        # D. Speak Reply
-                        if response_text:
-                            tts_audio = generate_sarvam_tts(response_text)
-                            if tts_audio:
-                                await ws.send_json({
-                                    "event": "media",
-                                    "media": {"payload": tts_audio, "content_type": "audio/wav"}
-                                })
-                        
-                    # Reset buffer for next turn
+                        tts_audio = generate_sarvam_tts(reply)
+                        if tts_audio:
+                            await ws.send_json({"event": "media", "media": {"payload": tts_audio, "content_type": "audio/wav"}})
+                    
                     audio_buffer = bytearray()
                     chunk_count = 0
-
             elif event_type == "stop":
-                log.info("🛑 Call Ended by User")
                 break
-
     except WebSocketDisconnect:
-        log.info("🔌 WS Disconnected")
-    except Exception as e:
-        log.error(f"🔥 Critical WS Error: {e}")
+        logger.info("🔌 WS Disconnected")
