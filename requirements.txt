@@ -1,9 +1,7 @@
 fastapi
 uvicorn
 requests
-websockets
 python-dotenv
-pydantic-settings
-google-genai
-python-multipart
+websockets
 g711
+pydantic
