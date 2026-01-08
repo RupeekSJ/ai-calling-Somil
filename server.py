@@ -1,4 +1,4 @@
-print("🚀 STARTING SERVER V3 - FIXED LOGGER")
+print("🚀 STARTING SERVER V4 - AUDIO DEBUG + TESTS")
 
 import os
 import json
@@ -20,44 +20,34 @@ from dotenv import load_dotenv
 # --- Configuration FIRST ---
 load_dotenv()
 
-# Setup Logging FIRST (before using logger)
+# Setup Logging FIRST
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("voicebot")
 
-# Load config AFTER logger is ready
+# Load config
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 PUBLIC_HOSTNAME = os.getenv("PUBLIC_HOSTNAME")
-EXOTEL_SID = os.getenv("EXOTEL_ACCOUNT_SID")  # Matches your .env
+EXOTEL_SID = os.getenv("EXOTEL_ACCOUNT_SID")
 EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
 EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
 EXOTEL_SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com")
 EXOTEL_FROM_NUMBER = os.getenv("EXOTEL_FROM_NUMBER")
 
-# Debug config loading
 logger.info("🚀 Config loaded:")
 logger.info(f"   SARVAM_API_KEY: {'✅' if SARVAM_API_KEY else '❌'}")
 logger.info(f"   PUBLIC_HOSTNAME: {PUBLIC_HOSTNAME}")
 logger.info(f"   EXOTEL_SID: {'✅' if EXOTEL_SID else '❌'}")
-logger.info(f"   EXOTEL_API_KEY: {'✅' if EXOTEL_API_KEY else '❌'}")
-logger.info(f"   EXOTEL_API_TOKEN: {'✅' if EXOTEL_API_TOKEN else '❌'}")
 logger.info(f"   EXOTEL_FROM_NUMBER: {EXOTEL_FROM_NUMBER}")
 
-app = FastAPI(title="Rupeek VoiceBot", version="3.0")
+app = FastAPI(title="Rupeek VoiceBot", version="4.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# --- Data Models ---
 class DialRequest(BaseModel):
     to: str
     from_: Optional[str] = Field(default=None, alias="from")
     exoml_url: Optional[str] = None
 
-# --- Debug Endpoint ---
+# 🚀 NEW DEBUG ENDPOINTS
 @app.get("/debug")
 async def debug():
     return {
@@ -69,57 +59,95 @@ async def debug():
         "SARVAM_API_KEY": bool(SARVAM_API_KEY)
     }
 
+@app.get("/ws-health")
+async def ws_health():
+    """Test WebSocket readiness"""
+    return {
+        "status": "ready", 
+        "websocket": f"wss://{PUBLIC_HOSTNAME or 'ai-calling-somil.onrender.com'}/ws",
+        "timestamp": "ready"
+    }
+
+@app.get("/test-tts")
+async def test_tts():
+    """Test Sarvam TTS directly"""
+    audio = generate_sarvam_tts("Hello this is a test")
+    return {
+        "success": bool(audio),
+        "length": len(audio) if audio else 0,
+        "sarvam_key_loaded": bool(SARVAM_API_KEY)
+    }
+
 @app.get("/")
 async def health():
-    return {"status": "ok", "service": "rupeek-voicebot-v3-fixed"}
+    return {"status": "ok", "service": "rupeek-voicebot-v4-audiofix"}
 
-# --- Helper Functions (unchanged) ---
+# --- Helper Functions (IMPROVED) ---
 def generate_sarvam_tts(text: str) -> Optional[str]:
     if not SARVAM_API_KEY:
         logger.error("❌ Sarvam API Key missing")
         return None
+    
     url = "https://api.sarvam.ai/text-to-speech"
-    headers = {"api-subscription-key": SARVAM_API_KEY, "Content-Type": "application/json"}
+    headers = {
+        "api-subscription-key": SARVAM_API_KEY, 
+        "Content-Type": "application/json"
+    }
     payload = {
         "inputs": [text],
         "target_language_code": "en-IN",
         "speaker": "meera",
-        "speech_sample_rate": 8000,
+        "speech_sample_rate": 8000,  # CRITICAL for Exotel
         "model": "bulbul:v1"
     }
+    
     try:
-        logger.info(f"🗣️ TTS: '{text[:50]}...'")
-        resp = requests.post(url, headers=headers, json=payload, timeout=10)
-        resp.raise_for_status()
+        logger.info(f"🗣️ TTS Request: '{text[:30]}...'")
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        logger.info(f"🗣️ TTS Response: {resp.status_code}")
+        
+        if resp.status_code != 200:
+            logger.error(f"❌ TTS HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
+            
         data = resp.json()
         if "audios" in data and data["audios"]:
-            return data["audios"][0]
+            audio_b64 = data["audios"][0]
+            logger.info(f"✅ TTS Success: {len(audio_b64)} bytes")
+            return audio_b64
+        else:
+            logger.error(f"❌ TTS No audio in response: {data}")
+            return None
+            
     except Exception as e:
-        logger.error(f"❌ TTS Error: {e}")
-    return None
+        logger.error(f"❌ TTS Exception: {e}")
+        return None
 
 def transcribe_sarvam_stt(audio_bytes: bytes) -> str:
     if not SARVAM_API_KEY or not audio_bytes:
         return ""
+    
     tmp_filename = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
             tmp_filename = tmp_wav.name
             with wave.open(tmp_filename, "wb") as wf:
                 wf.setnchannels(1)
-                wf.setsampwidth(2)
+                wf.setsampwidth(2)  # 16-bit PCM
                 wf.setframerate(8000)
                 wf.writeframes(audio_bytes)
+
         url = "https://api.sarvam.ai/speech-to-text"
         headers = {"api-subscription-key": SARVAM_API_KEY}
         with open(tmp_filename, "rb") as f:
             files = {'file': ('audio.wav', f, 'audio/wav')}
             data = {"model": "saarika:v1", "language_code": "en-IN"}
             resp = requests.post(url, headers=headers, files=files, data=data, timeout=15)
+            
         if resp.status_code == 200:
             return resp.json().get("transcript", "").strip()
         else:
-            logger.error(f"❌ STT HTTP {resp.status_code}")
+            logger.error(f"❌ STT HTTP {resp.status_code}: {resp.text[:100]}")
             return ""
     except Exception as e:
         logger.error(f"❌ STT Exception: {e}")
@@ -128,14 +156,15 @@ def transcribe_sarvam_stt(audio_bytes: bytes) -> str:
         if tmp_filename and os.path.exists(tmp_filename):
             os.remove(tmp_filename)
 
-# --- Routes (unchanged from previous version) ---
+# --- Exotel Routes ---
 @app.get("/exoml")
 @app.post("/exoml")
 async def get_exoml(request: Request):
     host = request.headers.get("host") or PUBLIC_HOSTNAME
     host = host.replace("http://", "").replace("https://", "").strip("/")
     wss_url = f"wss://{host}/ws"
-    xml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+    
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
         <Stream url="{wss_url}">
@@ -143,12 +172,12 @@ async def get_exoml(request: Request):
         </Stream>
     </Connect>
 </Response>"""
-    logger.info(f"📡 Exoml: {wss_url}")
-    return Response(content=xml_content, media_type="application/xml")
+    logger.info(f"📡 EXOML Returning: {wss_url}")
+    return Response(content=xml, media_type="application/xml")
 
 @app.post("/dial")
 async def dial(request: DialRequest):
-    logger.info(f"📞 Dial: {request.to}")
+    logger.info(f"📞 Dial: {request.to} from {request.from_ or EXOTEL_FROM_NUMBER}")
     
     missing = []
     if not EXOTEL_SID: missing.append("EXOTEL_ACCOUNT_SID")
@@ -156,6 +185,7 @@ async def dial(request: DialRequest):
     if not EXOTEL_API_TOKEN: missing.append("EXOTEL_API_TOKEN")
     
     if missing:
+        logger.error(f"❌ Missing: {missing}")
         return JSONResponse({"error": f"Missing: {', '.join(missing)}"}, status_code=500)
 
     url = f"https://{EXOTEL_API_KEY}:{EXOTEL_API_TOKEN}@{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/connect.json"
@@ -172,52 +202,96 @@ async def dial(request: DialRequest):
         resp = requests.post(url, data=payload, timeout=10)
         resp.raise_for_status()
         result = resp.json()
-        logger.info(f"✅ Dial SUCCESS: {result.get('CallSid')}")
+        logger.info(f"✅ Dial SUCCESS: CallSid={result.get('CallSid')}")
         return {"status": "success", "call_sid": result.get("CallSid")}
     except Exception as e:
         logger.error(f"❌ Dial failed: {e}")
         return JSONResponse({"status": "error", "details": str(e)}, status_code=500)
 
-# --- WebSocket (shortened for brevity) ---
+# --- WebSocket (ENHANCED with better error handling) ---
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
     await ws.accept()
-    logger.info("✅ WS Connected")
+    logger.info("✅ WebSocket CONNECTED - Exotel stream active!")
     
-    # Greeting
-    audio_b64 = generate_sarvam_tts("Namaste. I am your Rupeek assistant.")
-    if audio_b64:
-        await ws.send_json({"event": "media", "media": {"payload": audio_b64, "content_type": "audio/wav"}})
+    # 🎤 IMMEDIATE GREETING (Critical for audio test)
+    logger.info("🎤 Sending greeting...")
+    greeting_audio = generate_sarvam_tts("Namaste. Welcome to Rupeek. How can I help you?")
+    
+    if greeting_audio:
+        await ws.send_json({
+            "event": "media",
+            "media": {
+                "payload": greeting_audio,
+                "content_type": "audio/wav",
+                "sample_rate": 8000  # Explicit for Exotel
+            }
+        })
+        logger.info("✅ Greeting SENT - Check if you hear it!")
+    else:
+        logger.error("❌ Greeting FAILED - Sarvam TTS issue!")
+        # Send fallback silence message
+        await ws.send_json({"event": "clear"})
 
+    # Conversation loop
     audio_buffer = bytearray()
     chunk_count = 0
-    BUFFER_LIMIT = 80
+    BUFFER_LIMIT = 100  # Increased for better speech detection
 
     try:
         while True:
-            data = json.loads(await ws.receive_text())
-            if data.get("event") == "media":
-                payload = base64.b64decode(data["media"]["payload"])
-                pcm_chunk = g711.decode_ulaw(payload)
+            msg = await ws.receive_text()
+            data = json.loads(msg)
+            event = data.get("event")
+            
+            logger.info(f"📨 WS Event: {event}")
+
+            if event == "media":
+                # User speaking - buffer audio
+                payload_b64 = data["media"]["payload"]
+                mulaw_chunk = base64.b64decode(payload_b64)
+                pcm_chunk = g711.decode_ulaw(mulaw_chunk)
+                
                 audio_buffer.extend(pcm_chunk)
                 chunk_count += 1
                 
                 if chunk_count >= BUFFER_LIMIT:
+                    logger.info("⏳ Processing user speech...")
                     await ws.send_json({"event": "clear"})
+                    
                     user_text = transcribe_sarvam_stt(bytes(audio_buffer))
-                    logger.info(f"🎤 User: {user_text}")
+                    logger.info(f"🎤 User said: '{user_text}'")
                     
-                    if "loan" in user_text.lower():
-                        reply_audio = generate_sarvam_tts("We offer gold loans.")
+                    # Bot response
+                    if user_text and "loan" in user_text.lower():
+                        reply = generate_sarvam_tts("Great. Rupeek offers instant gold loans.")
+                    elif user_text:
+                        reply = generate_sarvam_tts("I understand. Tell me more.")
                     else:
-                        reply_audio = generate_sarvam_tts("I heard you.")
+                        reply = generate_sarvam_tts("Sorry, I did not hear clearly.")
                     
-                    if reply_audio:
-                        await ws.send_json({"event": "media", "media": {"payload": reply_audio, "content_type": "audio/wav"}})
+                    if reply:
+                        await ws.send_json({
+                            "event": "media",
+                            "media": {
+                                "payload": reply,
+                                "content_type": "audio/wav",
+                                "sample_rate": 8000
+                            }
+                        })
+                        logger.info("✅ Bot replied!")
                     
                     audio_buffer.clear()
                     chunk_count = 0
-            elif data.get("event") == "stop":
+                    
+            elif event == "stop":
+                logger.info("🛑 Call ended by Exotel")
                 break
+            elif event == "connected":
+                logger.info("🔗 Exotel stream connected")
+                
     except WebSocketDisconnect:
-        pass
+        logger.info("🔌 WebSocket disconnected normally")
+    except Exception as e:
+        logger.error(f"💥 WebSocket ERROR: {e}")
+        traceback.print_exc()
