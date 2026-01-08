@@ -130,39 +130,45 @@ async def collect_input(request: Request):
     <Speak language="en-IN">Thank you. Our team will call you shortly. Goodbye.</Speak>
 </Response>"""
     return Response(content=xml, media_type="application/xml")
-
 @app.post("/dial")
 async def dial(request: DialRequest):
     logger.info(f"📞 Dial: FROM={request.from_ or EXOTEL_FROM_NUMBER} TO={request.to}")
     
     missing = []
     if not EXOTEL_SID: missing.append("EXOTEL_ACCOUNT_SID")
-    if not EXOTEL_API_KEY: missing.append("EXOTEL_API_KEY")
+    if not EXOTEL_API_KEY: missing.append("EXOTEL_API_KEY") 
     if not EXOTEL_API_TOKEN: missing.append("EXOTEL_API_TOKEN")
     
     if missing:
         logger.error(f"❌ Missing: {missing}")
         return JSONResponse({"error": f"Missing: {', '.join(missing)}"}, status_code=500)
 
-    url = f"https://{EXOTEL_API_KEY}:{EXOTEL_API_TOKEN}@{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/connect.json"
-    callback_url = request.exoml_url or f"https://{PUBLIC_HOSTNAME or 'ai-calling-somil.onrender.com'}/exoml"
+    # ✅ FIXED ENDPOINT + AUTH + PAYLOAD
+    url = f"https://api.exotel.com/v1/Accounts/{EXOTEL_SID}/Calls.json"
     
     payload = {
-        "From": request.from_ or EXOTEL_FROM_NUMBER,  # USER (+917999796548)
-        "To": request.to,                             # EXOTEL (08069489493)
-        "Url": callback_url,
+        "From": request.from_ or EXOTEL_FROM_NUMBER,  # USER: +917999796548
+        "To": request.to,                             # EXOTEL: 08069489493
+        "Url": f"https://ai-calling-somil.onrender.com/exoml",
+        "StatusCallback": f"https://ai-calling-somil.onrender.com/status",
         "CallType": "trans"
     }
     
+    # ✅ FIXED AUTH (SID:Token)
+    auth = (EXOTEL_SID, EXOTEL_API_KEY)  # NOT API_KEY:API_TOKEN
+    
     try:
-        resp = requests.post(url, data=payload, timeout=10)
+        resp = requests.post(url, auth=auth, data=payload, timeout=10)
+        logger.info(f"🔍 Exotel Raw Response: {resp.status_code} {resp.text[:300]}")
         resp.raise_for_status()
         result = resp.json()
-        logger.info(f"✅ Dial SUCCESS: CallSid={result.get('CallSid')}")
-        return {"status": "success", "call_sid": result.get("CallSid")}
+        call_sid = result.get("CallSid") or result.get("call", {}).get("CallSid")
+        logger.info(f"✅ Dial SUCCESS: CallSid={call_sid}")
+        return {"status": "success", "call_sid": call_sid}
     except Exception as e:
-        logger.error(f"❌ Dial failed: {e}")
+        logger.error(f"❌ Dial failed: {e} | Response: {resp.text[:500]}")
         return JSONResponse({"status": "error", "details": str(e)}, status_code=500)
+
 
 # --- WebSocket (DISABLED for fallback testing) ---
 @app.websocket("/ws")
