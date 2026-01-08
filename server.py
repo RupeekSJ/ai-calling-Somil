@@ -1,3 +1,5 @@
+print("🚀 STARTING SERVER - HAS DIAL ENDPOINT V1")
+
 import os
 import json
 import base64
