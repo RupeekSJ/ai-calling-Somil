@@ -159,21 +159,21 @@ def transcribe_sarvam_stt(audio_bytes: bytes) -> str:
 # --- Exotel Routes ---
 @app.get("/exoml")
 @app.post("/exoml")
-async def get_exoml(request: Request):
-    host = request.headers.get("host") or PUBLIC_HOSTNAME
-    host = host.replace("http://", "").replace("https://", "").strip("/")
-    wss_url = f"wss://{host}/ws"
-    
-    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+async def exoml_fallback(request: Request):
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Connect>
-        <Stream url="{wss_url}">
-            <Parameter name="packetS" value="true" />
-        </Stream>
-    </Connect>
+    <Speak>Namaste. Welcome to Rupeek gold loans.</Speak>
+    <Pause length="1"/>
+    <Speak>We offer instant gold loans up to 75 percent of your gold value.</Speak>
+    <Pause length="1"/>
+    <Speak>Say loan for more details or thank you to end.</Speak>
+    <Gather inputTimeout="5" finishOnKey="#">
+        <Speak>Please speak now.</Speak>
+    </Gather>
 </Response>"""
-    logger.info(f"📡 EXOML Returning: {wss_url}")
+    logger.info("🎤 FALLBACK SPEAK - NO WEBSOCKET NEEDED")
     return Response(content=xml, media_type="application/xml")
+
 
 @app.post("/dial")
 async def dial(request: DialRequest):
