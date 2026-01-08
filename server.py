@@ -134,10 +134,9 @@ async def collect_input(request: Request):
 async def dial(request: DialRequest):
     logger.info(f"📞 Dial: FROM={request.from_ or EXOTEL_FROM_NUMBER} TO={request.to}")
     
-    # ✅ LOG ALL CREDS FOR DEBUG
-    logger.info(f"🔑 SID={EXOTEL_SID}, API_KEY={bool(EXOTEL_API_KEY)}, API_TOKEN={bool(EXOTEL_API_TOKEN)}")
+    # ✅ EXOTEL BASIC AUTH = API_KEY:API_TOKEN @ api.exotel.com
+    url = f"https://{EXOTEL_API_KEY}:{EXOTEL_API_TOKEN}@api.exotel.com/v1/Accounts/{EXOTEL_SID}/Calls.json"
     
-    url = "https://api.exotel.com/v1/Accounts/{EXOTEL_SID}/Calls.json".format(EXOTEL_SID=EXOTEL_SID)
     payload = {
         "From": request.from_ or EXOTEL_FROM_NUMBER,  # +917999796548 (USER)
         "To": request.to,                             # 08069489493 (EXOTEL)
@@ -145,25 +144,28 @@ async def dial(request: DialRequest):
         "StatusCallback": "https://ai-calling-somil.onrender.com/status"
     }
     
-    # 🔥 EXOTEL AUTH = (SID, API_KEY) - NOT API_TOKEN!
-    auth = (EXOTEL_SID, EXOTEL_API_KEY)  
-    
     try:
-        resp = requests.post(url, auth=auth, data=payload, timeout=10)
-        logger.info(f"🔍 DEBUG: Status={resp.status_code}, Response={resp.text[:400]}")
+        resp = requests.post(url, data=payload, timeout=10)
+        logger.info(f"🔍 Status={resp.status_code} Response={resp.text[:400]}")
         
         if resp.status_code != 200:
-            logger.error(f"❌ EXOTEL ERROR {resp.status_code}: {resp.text}")
-            return JSONResponse({"error": f"Exotel {resp.status_code}", "response": resp.text}, status_code=500)
+            return JSONResponse({
+                "error": f"Exotel {resp.status_code}", 
+                "response": resp.text,
+                "url_used": url[:50] + "..."
+            }, status_code=500)
             
         result = resp.json()
-        call_sid = result.get("CallSid") or result.get("call", {}).get("CallSid", "UNKNOWN")
+        call_sid = result.get("CallSid") or result.get("call", {}).get("CallSid", "NO_CALLSID")
         logger.info(f"✅ Dial SUCCESS: CallSid={call_sid}")
         return {"status": "success", "call_sid": call_sid}
         
     except Exception as e:
         logger.error(f"❌ Dial failed: {e}")
         return JSONResponse({"status": "error", "details": str(e)}, status_code=500)
+
+    
+
 @app.get("/creds")
 async def debug_creds():
     return {
