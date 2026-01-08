@@ -1,205 +1,221 @@
-print("🚀 STARTING SERVER V4 - AUDIO DEBUG + TESTS - FIXED EXOTEL")
+print("🚀 STARTING SERVER V4 - EXOTEL CONNECT.JSON (FINAL)")
 
 import os
-import json
-import base64
 import logging
-import tempfile
-import wave
 import requests
 import traceback
-import g711
 from typing import Optional
+
 from fastapi import FastAPI, WebSocket, Request, Response
-from fastapi.websockets import WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-# --- Configuration FIRST ---
+# --------------------------------------------------
+# LOAD ENV
+# --------------------------------------------------
 load_dotenv()
 
-# Setup Logging FIRST
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL),
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 logger = logging.getLogger("voicebot")
 
-# Load config
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
+# --------------------------------------------------
+# CONFIG
+# --------------------------------------------------
 PUBLIC_HOSTNAME = os.getenv("PUBLIC_HOSTNAME")
+
 EXOTEL_SID = os.getenv("EXOTEL_ACCOUNT_SID")
 EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
 EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
-EXOTEL_SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com")
-EXOTEL_FROM_NUMBER = os.getenv("EXOTEL_FROM_NUMBER", "08069489493")  # Exotel number
+EXOTEL_FROM_NUMBER = os.getenv("EXOTEL_FROM_NUMBER")
 
-logger.info("🚀 Config loaded:")
-logger.info(f"   SARVAM_API_KEY: {'✅' if SARVAM_API_KEY else '❌'}")
-logger.info(f"   PUBLIC_HOSTNAME: {PUBLIC_HOSTNAME}")
-logger.info(f"   EXOTEL_SID: {'✅' if EXOTEL_SID else '❌'}")
-logger.info(f"   EXOTEL_FROM_NUMBER: {EXOTEL_FROM_NUMBER}")
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")  # not used yet
 
-app = FastAPI(title="Rupeek VoiceBot", version="4.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+logger.info("🚀 Config loaded")
+logger.info(f"PUBLIC_HOSTNAME = {PUBLIC_HOSTNAME}")
+logger.info(f"EXOTEL_SID loaded = {'✅' if EXOTEL_SID else '❌'}")
+logger.info(f"EXOTEL_FROM_NUMBER = {EXOTEL_FROM_NUMBER}")
 
-# FIXED DialRequest - only needs USER phone number
+# --------------------------------------------------
+# APP
+# --------------------------------------------------
+app = FastAPI(title="Rupeek VoiceBot", version="4.2")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --------------------------------------------------
+# MODELS
+# --------------------------------------------------
 class DialRequest(BaseModel):
-    from_: str = Field(..., alias="from")  # User number (+917999796548)
-    exoml_url: Optional[str] = None
+    from_: str = Field(..., alias="from")  # USER PHONE NUMBER
 
-# 🚀 DEBUG ENDPOINTS
+
+# --------------------------------------------------
+# HEALTH & DEBUG
+# --------------------------------------------------
+@app.get("/")
+async def health():
+    return {"status": "ok", "service": "rupeek-voicebot"}
+
 @app.get("/debug")
 async def debug():
     return {
+        "PUBLIC_HOSTNAME": PUBLIC_HOSTNAME,
         "EXOTEL_ACCOUNT_SID": bool(EXOTEL_SID),
         "EXOTEL_API_KEY": bool(EXOTEL_API_KEY),
         "EXOTEL_API_TOKEN": bool(EXOTEL_API_TOKEN),
         "EXOTEL_FROM_NUMBER": EXOTEL_FROM_NUMBER,
-        "PUBLIC_HOSTNAME": PUBLIC_HOSTNAME,
-        "SARVAM_API_KEY": bool(SARVAM_API_KEY)
+        "SARVAM_API_KEY": bool(SARVAM_API_KEY),
     }
 
-@app.get("/creds")
-async def debug_creds():
-    return {
-        "sid": EXOTEL_SID,
-        "api_key_exists": bool(EXOTEL_API_KEY),
-        "api_token_exists": bool(EXOTEL_API_TOKEN),
-        "from_number": EXOTEL_FROM_NUMBER,
-        "dial_format": "From=EXOTEL_FROM_NUMBER, To=USER_PHONE"
-    }
 
-@app.get("/test-tts")
-async def test_tts():
-    """Test Sarvam TTS directly"""
-    audio = generate_sarvam_tts("Hello this is a test")
-    return {
-        "success": bool(audio),
-        "length": len(audio) if audio else 0,
-        "sarvam_key_loaded": bool(SARVAM_API_KEY)
-    }
-
-@app.get("/")
-async def health():
-    return {"status": "ok", "service": "rupeek-voicebot-v4-fixed"}
-
-# --- FIXED TTS ---
-def generate_sarvam_tts(text: str) -> Optional[str]:
-    if not SARVAM_API_KEY:
-        logger.error("❌ Sarvam API Key missing")
-        return None
-    
-    url = "https://api.sarvam.ai/text-to-speech"
-    headers = {"api-subscription-key": SARVAM_API_KEY, "Content-Type": "application/json"}
-    payload = {
-        "inputs": [text],
-        "text_language_code": "en",
-        "voice_id": "meera",
-        "output_format": "base64",
-        "sample_rate": 8000
-    }
-    
-    try:
-        logger.info(f"🗣️ TTS: '{text[:30]}...'")
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
-        
-        if resp.status_code != 200:
-            logger.error(f"❌ TTS HTTP {resp.status_code}: {resp.text[:200]}")
-            return None
-            
-        data = resp.json()
-        if "audios" in data and data["audios"]:
-            return data["audios"][0]
-        return None
-    except Exception as e:
-        logger.error(f"❌ TTS Exception: {e}")
-        return None
-
-# --- FIXED EXOTEL ROUTES ---
+# --------------------------------------------------
+# EXOML
+# --------------------------------------------------
 @app.get("/exoml")
 @app.post("/exoml")
-async def exoml_fallback(request: Request):
+async def exoml():
+    logger.info("🎤 ExoML HIT")
+
     xml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Speak language="en-IN">Namaste. Welcome to Rupeek gold loans.</Speak>
+    <Speak language="en-IN">
+        Namaste. Welcome to Rupeek gold loans.
+    </Speak>
     <Pause length="1"/>
-    <Speak language="en-IN">We offer instant gold loans up to 75 percent of your gold value.</Speak>
+    <Speak language="en-IN">
+        We offer instant gold loans up to seventy five percent of your gold value.
+    </Speak>
     <Pause length="1"/>
-    <Speak language="en-IN">Press 1 for details or hang up to end.</Speak>
-    <Gather action="https://ai-calling-somil.onrender.com/collect" inputTimeout="5" finishOnKey="#"/>
-</Response>"""
-    logger.info("🎤 FALLBACK SPEAK ACTIVE ✅")
+    <Speak language="en-IN">
+        Press 1 for more details or hang up to end this call.
+    </Speak>
+    <Gather
+        action="https://ai-calling-somil.onrender.com/collect"
+        inputTimeout="5"
+        finishOnKey="#"
+    />
+</Response>
+"""
     return Response(content=xml, media_type="application/xml")
+
 
 @app.post("/collect")
-async def collect_input(request: Request):
+async def collect(request: Request):
     body = await request.body()
-    logger.info(f"🔢 DTMF INPUT: {body}")
+    logger.info(f"🔢 DTMF RECEIVED: {body}")
+
     xml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Speak language="en-IN">Thank you. Our team will call you shortly. Goodbye.</Speak>
-</Response>"""
+    <Speak language="en-IN">
+        Thank you. Our team will contact you shortly. Goodbye.
+    </Speak>
+</Response>
+"""
     return Response(content=xml, media_type="application/xml")
 
-@app.post("/status")
-async def status_callback(request: Request):
-    body = await request.body()
-    logger.info(f"📞 STATUS CALLBACK: {body}")
-    return Response(content="OK", media_type="text/plain")
 
-# 🔥 PERFECTLY FIXED DIAL ENDPOINT
+# --------------------------------------------------
+# DIAL (Exotel connect.json)
+# --------------------------------------------------
 @app.post("/dial")
 async def dial(request: DialRequest):
-    logger.info(f"📞 Dial: FROM={EXOTEL_FROM_NUMBER} TO={request.from_}")
-    
+    logger.info(
+        f"📞 Dial request | USER={request.from_} | EXOTEL={EXOTEL_FROM_NUMBER}"
+    )
+
     missing = []
-    if not EXOTEL_SID: missing.append("EXOTEL_ACCOUNT_SID")
-    if not EXOTEL_API_KEY: missing.append("EXOTEL_API_KEY")
-    if not EXOTEL_API_TOKEN: missing.append("EXOTEL_API_TOKEN")
-    
+    if not EXOTEL_SID:
+        missing.append("EXOTEL_ACCOUNT_SID")
+    if not EXOTEL_API_KEY:
+        missing.append("EXOTEL_API_KEY")
+    if not EXOTEL_API_TOKEN:
+        missing.append("EXOTEL_API_TOKEN")
+    if not EXOTEL_FROM_NUMBER:
+        missing.append("EXOTEL_FROM_NUMBER")
+
     if missing:
-        logger.error(f"❌ Missing: {missing}")
-        return JSONResponse({"error": f"Missing: {', '.join(missing)}"}, status_code=500)
+        logger.error(f"❌ Missing env vars: {missing}")
+        return JSONResponse(
+            {"error": f"Missing env vars: {', '.join(missing)}"},
+            status_code=500,
+        )
 
-    # ✅ EXOTEL BASIC AUTH + CORRECT ENDPOINT
-    url = f"https://{EXOTEL_API_KEY}:{EXOTEL_API_TOKEN}@api.exotel.com/v1/Accounts/{EXOTEL_SID}/Calls.json"
-    
+    url = f"https://api.exotel.com/v1/Accounts/{EXOTEL_SID}/Calls/connect.json"
+
     payload = {
-        "From": EXOTEL_FROM_NUMBER,           # 08069489493 (CALLER - Exotel)
-        "To": request.from_,                  # +917999796548 (RECEIVER - User)
-        "Url": "https://ai-calling-somil.onrender.com/exoml",
-        "StatusCallback": "https://ai-calling-somil.onrender.com/status",
-        "CallType": "trans"
+        "From": request.from_,          # USER number
+        "CallerId": EXOTEL_FROM_NUMBER, # EXOTEL number
+        "Url": f"{PUBLIC_HOSTNAME}/exoml",
     }
-    
+
     try:
-        resp = requests.post(url, data=payload, timeout=10)
-        logger.info(f"🔍 Exotel Status={resp.status_code} Response={resp.text[:400]}")
-        
+        resp = requests.post(
+            url,
+            data=payload,
+            auth=(EXOTEL_API_KEY, EXOTEL_API_TOKEN),
+            timeout=10,
+        )
+
+        logger.info(
+            f"🔍 Exotel response {resp.status_code}: {resp.text[:300]}"
+        )
+
         if resp.status_code != 200:
-            logger.error(f"❌ EXOTEL ERROR {resp.status_code}: {resp.text}")
-            return JSONResponse({
-                "error": f"Exotel {resp.status_code}",
-                "response": resp.text,
-                "payload": payload
-            }, status_code=500)
-            
-        result = resp.json()
-        call_sid = result.get("CallSid") or result.get("call", {}).get("CallSid", "NO_CALLSID")
-        logger.info(f"✅ Dial SUCCESS: CallSid={call_sid}")
+            return JSONResponse(
+                {
+                    "error": "Exotel call failed",
+                    "status_code": resp.status_code,
+                    "response": resp.text,
+                },
+                status_code=500,
+            )
+
+        data = resp.json()
+        call_sid = (
+            data.get("CallSid")
+            or data.get("call", {}).get("sid")
+            or "UNKNOWN"
+        )
+
+        logger.info(f"✅ Call placed | CallSid={call_sid}")
+
         return {"status": "success", "call_sid": call_sid}
-        
-    except Exception as e:
-        logger.error(f"❌ Dial failed: {e}")
-        return JSONResponse({"status": "error", "details": str(e)}, status_code=500)
 
-# --- WebSocket (DISABLED for fallback testing) ---
+    except Exception:
+        logger.error(traceback.format_exc())
+        return JSONResponse(
+            {"status": "error", "message": "Dial failed"},
+            status_code=500,
+        )
+
+
+# --------------------------------------------------
+# WEBSOCKET (NOT USED BY EXOTEL)
+# --------------------------------------------------
 @app.websocket("/ws")
-async def ws_handler(ws: WebSocket):
+async def ws(ws: WebSocket):
     await ws.accept()
-    logger.info("🔗 WebSocket connected (fallback testing active)")
-    await ws.send_json({"event": "clear", "message": "Use /exoml fallback for testing"})
+    await ws.send_json(
+        {"message": "WebSocket active (Exotel does not use this)"}
+    )
 
+
+# --------------------------------------------------
+# LOCAL RUN
+# --------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
