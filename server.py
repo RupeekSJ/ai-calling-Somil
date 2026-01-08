@@ -7,13 +7,14 @@ import logging
 import tempfile
 import wave
 import requests
+import traceback  # <--- Added for debugging
 import g711  # pip install g711
 from typing import Optional
 from fastapi import FastAPI, WebSocket, Request, Response
 from fastapi.websockets import WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field  # <--- Added Field for V2
 from dotenv import load_dotenv
 
 # --- Configuration ---
@@ -41,13 +42,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Data Models ---
+# --- Data Models (FIXED FOR PYDANTIC V2) ---
 class DialRequest(BaseModel):
     to: str
-    from_: Optional[str] = None
+    # 'from' is a reserved keyword, so we use 'from_' and map it with Field(alias="from")
+    from_: Optional[str] = Field(default=None, alias="from") 
     exoml_url: Optional[str] = None
-    class Config:
-        fields = {'from_': 'from'}
 
 # --- Helper Functions ---
 def generate_sarvam_tts(text: str) -> str:
@@ -108,7 +108,7 @@ def transcribe_sarvam_stt(audio_bytes: bytes) -> str:
 
 @app.get("/")
 async def health():
-    return {"status": "ok", "service": "sarvam-exotel-voicebot-v3-dial"}
+    return {"status": "ok", "service": "sarvam-exotel-voicebot-v3-fixed"}
 
 @app.get("/exoml")
 @app.post("/exoml")
@@ -157,6 +157,7 @@ async def dial(request: DialRequest):
         return {"status": "success", "exotel": resp.json()}
     except Exception as e:
         logger.error(f"Dial Failed: {e}")
+        traceback.print_exc()
         return JSONResponse({"status": "error", "details": str(e)}, status_code=500)
 
 # --- WebSocket ---
