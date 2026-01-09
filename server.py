@@ -1,9 +1,11 @@
-print("🚀 STARTING SERVER V4.4 - EXOTEL CONNECT.JSON (FIXED & STABLE)")
+print("🚀 STARTING SERVER V4.5 - EXOTEL CONNECT.JSON (MAX DEBUG)")
 
 import os
 import logging
 import requests
 import traceback
+import uuid
+from datetime import datetime
 
 from fastapi import FastAPI, WebSocket, Request, Response
 from fastapi.responses import JSONResponse
@@ -28,7 +30,6 @@ logger = logging.getLogger("voicebot")
 # CONFIG
 # --------------------------------------------------
 PUBLIC_HOSTNAME = os.getenv("PUBLIC_HOSTNAME")
-
 EXOTEL_SID = os.getenv("EXOTEL_ACCOUNT_SID")
 EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
 EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
@@ -36,13 +37,12 @@ EXOTEL_FROM_NUMBER = os.getenv("EXOTEL_FROM_NUMBER")
 
 logger.info("🚀 Config loaded")
 logger.info(f"PUBLIC_HOSTNAME = {PUBLIC_HOSTNAME}")
-logger.info(f"EXOTEL_SID loaded = {'✅' if EXOTEL_SID else '❌'}")
 logger.info(f"EXOTEL_FROM_NUMBER = {EXOTEL_FROM_NUMBER}")
 
 # --------------------------------------------------
 # APP
 # --------------------------------------------------
-app = FastAPI(title="Rupeek VoiceBot", version="4.4")
+app = FastAPI(title="Rupeek VoiceBot", version="4.5-DEBUG")
 
 app.add_middleware(
     CORSMiddleware,
@@ -55,35 +55,55 @@ app.add_middleware(
 # MODELS
 # --------------------------------------------------
 class DialRequest(BaseModel):
-    from_: str = Field(..., alias="from")  # USER PHONE NUMBER (+91...)
+    from_: str = Field(..., alias="from")
 
 # --------------------------------------------------
-# HEALTH & DEBUG
+# GLOBAL REQUEST LOGGER
+# --------------------------------------------------
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    request_id = str(uuid.uuid4())[:8]
+    start_time = datetime.utcnow()
+
+    logger.info(
+        f"➡️  [{request_id}] {request.method} {request.url} "
+        f"HEADERS={dict(request.headers)}"
+    )
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.error(f"💥 [{request_id}] UNHANDLED EXCEPTION")
+        logger.error(traceback.format_exc())
+        raise
+
+    duration = (datetime.utcnow() - start_time).total_seconds()
+    logger.info(
+        f"⬅️  [{request_id}] {request.method} {request.url} "
+        f"STATUS={response.status_code} TIME={duration}s"
+    )
+    return response
+
+# --------------------------------------------------
+# HEALTH
 # --------------------------------------------------
 @app.get("/")
 async def health():
-    return {"status": "ok", "service": "rupeek-voicebot"}
-
-@app.get("/debug")
-async def debug():
-    return {
-        "PUBLIC_HOSTNAME": PUBLIC_HOSTNAME,
-        "EXOTEL_ACCOUNT_SID": bool(EXOTEL_SID),
-        "EXOTEL_API_KEY": bool(EXOTEL_API_KEY),
-        "EXOTEL_API_TOKEN": bool(EXOTEL_API_TOKEN),
-        "EXOTEL_FROM_NUMBER": EXOTEL_FROM_NUMBER,
-    }
+    return {"status": "ok", "time": datetime.utcnow().isoformat()}
 
 # --------------------------------------------------
-# EXOML (🚨 CRITICAL FIXED)
+# EXOML
 # --------------------------------------------------
 @app.get("/exoml")
 @app.post("/exoml")
-async def exoml():
-    logger.info("🎤 ExoML HIT")
+async def exoml(request: Request):
+    logger.info("🎤 EXOML HIT — CALL CONNECTED")
+    logger.info(f"📞 Exotel headers: {dict(request.headers)}")
 
     xml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
+
+    <Pause length="1"/>
 
     <Say language="en-IN">
         Namaste. Welcome to Rupeek gold loans.
@@ -97,15 +117,20 @@ async def exoml():
 
     <Pause length="1"/>
 
-    <Gather
-        input="dtmf"
-        action="https://ai-calling-somil.onrender.com/collect"
-        timeout="10"
-        finishOnKey="#">
+    <Gather input="dtmf"
+            action="https://ai-calling-somil.onrender.com/collect"
+            timeout="10"
+            finishOnKey="#">
         <Say language="en-IN">
             Press 1 for more details.
         </Say>
     </Gather>
+
+    <Pause length="3"/>
+
+    <Say language="en-IN">
+        No input received. Goodbye.
+    </Say>
 
 </Response>
 """
@@ -117,7 +142,9 @@ async def exoml():
 @app.post("/collect")
 async def collect(request: Request):
     body = await request.body()
-    logger.info(f"🔢 DTMF RECEIVED: {body}")
+    logger.info("🔢 COLLECT HIT")
+    logger.info(f"🔢 RAW BODY = {body}")
+    logger.info(f"🔢 HEADERS = {dict(request.headers)}")
 
     xml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -129,60 +156,69 @@ async def collect(request: Request):
     return Response(content=xml, media_type="application/xml")
 
 # --------------------------------------------------
-# DIAL (connect.json)
+# CALL STATUS WEBHOOK (🔥 VERY IMPORTANT)
+# --------------------------------------------------
+@app.post("/call-status")
+async def call_status(request: Request):
+    body = await request.body()
+    logger.info("📡 CALL STATUS WEBHOOK HIT")
+    logger.info(f"📡 BODY = {body}")
+    logger.info(f"📡 HEADERS = {dict(request.headers)}")
+    return {"ok": True}
+
+# --------------------------------------------------
+# DIAL
 # --------------------------------------------------
 @app.post("/dial")
 async def dial(request: DialRequest):
-    logger.info(
-        f"📞 Dial request | USER={request.from_} | EXOTEL={EXOTEL_FROM_NUMBER}"
-    )
+    logger.info(f"📞 DIAL REQUEST RECEIVED | USER={request.from_}")
 
     url = f"https://api.exotel.com/v1/Accounts/{EXOTEL_SID}/Calls/connect.json"
 
     payload = {
-        "From": request.from_,           # USER NUMBER
-        "CallerId": EXOTEL_FROM_NUMBER,  # EXOTEL NUMBER
+        "From": request.from_,                 # USER
+        "CallerId": EXOTEL_FROM_NUMBER,        # EXOTEL
         "Url": f"{PUBLIC_HOSTNAME}/exoml",
+        "StatusCallback": f"{PUBLIC_HOSTNAME}/call-status",
+        "StatusCallbackEvents": "initiated,answered,completed",
     }
+
+    logger.info(f"📤 EXOTEL REQUEST PAYLOAD = {payload}")
 
     try:
         resp = requests.post(
             url,
             data=payload,
             auth=(EXOTEL_API_KEY, EXOTEL_API_TOKEN),
-            timeout=10,
+            timeout=15,
         )
 
-        logger.info(f"🔍 Exotel response {resp.status_code}: {resp.text[:300]}")
+        logger.info("📥 EXOTEL RESPONSE HEADERS")
+        logger.info(resp.headers)
 
-        if resp.status_code != 200:
-            return JSONResponse(
-                {"error": "Exotel call failed", "response": resp.text},
-                status_code=500,
-            )
+        logger.info("📥 EXOTEL RESPONSE BODY")
+        logger.info(resp.text)
 
-        data = resp.json()
-        call_sid = data.get("Call", {}).get("Sid", "UNKNOWN")
-
-        logger.info(f"✅ Call placed | CallSid={call_sid}")
-        return {"status": "success", "call_sid": call_sid}
+        return {
+            "status_code": resp.status_code,
+            "response": resp.text
+        }
 
     except Exception:
+        logger.error("💥 DIAL FAILED")
         logger.error(traceback.format_exc())
         return JSONResponse(
-            {"status": "error", "message": "Dial failed"},
-            status_code=500,
+            {"error": "Dial exception"},
+            status_code=500
         )
 
 # --------------------------------------------------
-# WEBSOCKET (NOT USED)
+# WEBSOCKET
 # --------------------------------------------------
 @app.websocket("/ws")
 async def ws(ws: WebSocket):
     await ws.accept()
-    await ws.send_json(
-        {"message": "WebSocket active (Exotel does not use this)"}
-    )
+    await ws.send_json({"debug": "WebSocket connected"})
 
 # --------------------------------------------------
 # LOCAL RUN
