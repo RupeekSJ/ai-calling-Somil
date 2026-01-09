@@ -1,10 +1,9 @@
-print("🚀 STARTING SERVER V4.3 - EXOTEL CONNECT.JSON (STABLE)")
+print("🚀 STARTING SERVER V4.4 - EXOTEL CONNECT.JSON (FIXED & STABLE)")
 
 import os
 import logging
 import requests
 import traceback
-from typing import Optional
 
 from fastapi import FastAPI, WebSocket, Request, Response
 from fastapi.responses import JSONResponse
@@ -35,8 +34,6 @@ EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
 EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
 EXOTEL_FROM_NUMBER = os.getenv("EXOTEL_FROM_NUMBER")
 
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")  # not used yet
-
 logger.info("🚀 Config loaded")
 logger.info(f"PUBLIC_HOSTNAME = {PUBLIC_HOSTNAME}")
 logger.info(f"EXOTEL_SID loaded = {'✅' if EXOTEL_SID else '❌'}")
@@ -45,7 +42,7 @@ logger.info(f"EXOTEL_FROM_NUMBER = {EXOTEL_FROM_NUMBER}")
 # --------------------------------------------------
 # APP
 # --------------------------------------------------
-app = FastAPI(title="Rupeek VoiceBot", version="4.3")
+app = FastAPI(title="Rupeek VoiceBot", version="4.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -59,7 +56,6 @@ app.add_middleware(
 # --------------------------------------------------
 class DialRequest(BaseModel):
     from_: str = Field(..., alias="from")  # USER PHONE NUMBER (+91...)
-
 
 # --------------------------------------------------
 # HEALTH & DEBUG
@@ -76,12 +72,10 @@ async def debug():
         "EXOTEL_API_KEY": bool(EXOTEL_API_KEY),
         "EXOTEL_API_TOKEN": bool(EXOTEL_API_TOKEN),
         "EXOTEL_FROM_NUMBER": EXOTEL_FROM_NUMBER,
-        "SARVAM_API_KEY": bool(SARVAM_API_KEY),
     }
 
-
 # --------------------------------------------------
-# EXOML (CRITICAL FIXED)
+# EXOML (🚨 CRITICAL FIXED)
 # --------------------------------------------------
 @app.get("/exoml")
 @app.post("/exoml")
@@ -103,25 +97,23 @@ async def exoml():
 
     <Pause length="1"/>
 
-    <Gather action="https://ai-calling-somil.onrender.com/collect"
-            timeout="10"
-            finishOnKey="#">
+    <Gather
+        input="dtmf"
+        action="https://ai-calling-somil.onrender.com/collect"
+        timeout="10"
+        finishOnKey="#">
         <Say language="en-IN">
             Press 1 for more details.
         </Say>
     </Gather>
 
-    <Pause length="5"/>
-
-    <Say language="en-IN">
-        We did not receive your input. Please try again later. Goodbye.
-    </Say>
-
 </Response>
 """
     return Response(content=xml, media_type="application/xml")
 
-
+# --------------------------------------------------
+# COLLECT
+# --------------------------------------------------
 @app.post("/collect")
 async def collect(request: Request):
     body = await request.body()
@@ -136,9 +128,8 @@ async def collect(request: Request):
 """
     return Response(content=xml, media_type="application/xml")
 
-
 # --------------------------------------------------
-# DIAL (Exotel connect.json — CORRECT)
+# DIAL (connect.json)
 # --------------------------------------------------
 @app.post("/dial")
 async def dial(request: DialRequest):
@@ -146,28 +137,11 @@ async def dial(request: DialRequest):
         f"📞 Dial request | USER={request.from_} | EXOTEL={EXOTEL_FROM_NUMBER}"
     )
 
-    missing = []
-    if not EXOTEL_SID:
-        missing.append("EXOTEL_ACCOUNT_SID")
-    if not EXOTEL_API_KEY:
-        missing.append("EXOTEL_API_KEY")
-    if not EXOTEL_API_TOKEN:
-        missing.append("EXOTEL_API_TOKEN")
-    if not EXOTEL_FROM_NUMBER:
-        missing.append("EXOTEL_FROM_NUMBER")
-
-    if missing:
-        logger.error(f"❌ Missing env vars: {missing}")
-        return JSONResponse(
-            {"error": f"Missing env vars: {', '.join(missing)}"},
-            status_code=500,
-        )
-
     url = f"https://api.exotel.com/v1/Accounts/{EXOTEL_SID}/Calls/connect.json"
 
     payload = {
         "From": request.from_,           # USER NUMBER
-        "CallerId": EXOTEL_FROM_NUMBER,  # EXOTEL VIRTUAL NUMBER
+        "CallerId": EXOTEL_FROM_NUMBER,  # EXOTEL NUMBER
         "Url": f"{PUBLIC_HOSTNAME}/exoml",
     }
 
@@ -179,30 +153,18 @@ async def dial(request: DialRequest):
             timeout=10,
         )
 
-        logger.info(
-            f"🔍 Exotel response {resp.status_code}: {resp.text[:300]}"
-        )
+        logger.info(f"🔍 Exotel response {resp.status_code}: {resp.text[:300]}")
 
         if resp.status_code != 200:
             return JSONResponse(
-                {
-                    "error": "Exotel call failed",
-                    "status_code": resp.status_code,
-                    "response": resp.text,
-                },
+                {"error": "Exotel call failed", "response": resp.text},
                 status_code=500,
             )
 
         data = resp.json()
-
-        call_sid = (
-            data.get("Call", {}).get("Sid")
-            or data.get("CallSid")
-            or "UNKNOWN"
-        )
+        call_sid = data.get("Call", {}).get("Sid", "UNKNOWN")
 
         logger.info(f"✅ Call placed | CallSid={call_sid}")
-
         return {"status": "success", "call_sid": call_sid}
 
     except Exception:
@@ -212,9 +174,8 @@ async def dial(request: DialRequest):
             status_code=500,
         )
 
-
 # --------------------------------------------------
-# WEBSOCKET (NOT USED BY EXOTEL)
+# WEBSOCKET (NOT USED)
 # --------------------------------------------------
 @app.websocket("/ws")
 async def ws(ws: WebSocket):
@@ -222,7 +183,6 @@ async def ws(ws: WebSocket):
     await ws.send_json(
         {"message": "WebSocket active (Exotel does not use this)"}
     )
-
 
 # --------------------------------------------------
 # LOCAL RUN
