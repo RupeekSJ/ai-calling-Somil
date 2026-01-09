@@ -1,4 +1,4 @@
-print("🚀 STARTING SERVER V4.5 - EXOTEL CONNECT.JSON (DEBUG-STABLE)")
+print("🚀 STARTING SERVER V5.0 - EXOTEL + SARVAM TTS (PROD READY)")
 
 import os
 import uuid
@@ -7,14 +7,12 @@ import requests
 import traceback
 import time
 import asyncio
-import json
-import websockets
-
-from fastapi import FastAPI, Request, Response, BackgroundTasks
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+import base64
 
 # --------------------------------------------------
 # LOAD ENV
@@ -22,22 +20,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL),
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-logger = logging.getLogger("voicebot")
-
-# --------------------------------------------------
-# CONFIG
-# --------------------------------------------------
 PUBLIC_HOSTNAME = os.getenv("PUBLIC_HOSTNAME")
 
 EXOTEL_SID = os.getenv("EXOTEL_ACCOUNT_SID")
 EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
 EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
 EXOTEL_FROM_NUMBER = os.getenv("EXOTEL_FROM_NUMBER")
+
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
+
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL),
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+logger = logging.getLogger("voicebot")
 
 logger.info("🚀 Config loaded")
 logger.info(f"PUBLIC_HOSTNAME = {PUBLIC_HOSTNAME}")
@@ -47,7 +43,7 @@ logger.info(f"EXOTEL_FROM_NUMBER = {EXOTEL_FROM_NUMBER}")
 # --------------------------------------------------
 # APP
 # --------------------------------------------------
-app = FastAPI(title="Rupeek VoiceBot", version="4.5")
+app = FastAPI(title="Rupeek VoiceBot + Sarvam TTS", version="5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -97,78 +93,83 @@ async def debug():
         "EXOTEL_API_KEY": bool(EXOTEL_API_KEY),
         "EXOTEL_API_TOKEN": bool(EXOTEL_API_TOKEN),
         "EXOTEL_FROM_NUMBER": EXOTEL_FROM_NUMBER,
+        "SARVAM_API_KEY": bool(SARVAM_API_KEY),
     }
 
 # --------------------------------------------------
-# EXOTEL ECHO (WebSocket helper)
+# SARVAM TTS HELPER
 # --------------------------------------------------
-async def echo_loop(ws_url):
-    """Connect to Exotel WebSocket and send minimal echo to keep call alive"""
-    async with websockets.connect(ws_url) as websocket:
-        logger.info(f"Connected to Exotel WebSocket at {ws_url}")
-        try:
-            async for message in websocket:
-                data = json.loads(message)
-                event = data.get("event")
+def generate_sarvam_audio(text: str) -> str:
+    """
+    Call Sarvam API to generate TTS audio.
+    Returns a base64 audio string.
+    """
+    try:
+        payload = {"text": text, "voice": "en-IN"}
+        headers = {"Authorization": f"Bearer {SARVAM_API_KEY}"}
 
-                if event == "media":
-                    # Minimal silent echo back to keep call alive
-                    stream_sid = data.get("stream_sid")
-                    echo = {
-                        "event": "media",
-                        "stream_sid": stream_sid,
-                        "media": {
-                            "payload": "",  # empty payload is enough
-                            "chunk": "silent"
-                        }
-                    }
-                    await websocket.send(json.dumps(echo))
-                    logger.info(f"Echoed silent audio back to stream {stream_sid}")
-
-                elif event == "stop":
-                    logger.info("Stream stopped by Exotel")
-                    break
-
-        except websockets.exceptions.ConnectionClosed:
-            logger.info("WebSocket closed by server")
-        except Exception as e:
-            logger.error(f"WebSocket error: {e}")
-
-def start_echo(ws_url):
-    asyncio.run(echo_loop(ws_url))
+        resp = requests.post(
+            "https://api.sarvam.ai/v1/tts",
+            json=payload,
+            headers=headers,
+            timeout=15
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        audio_base64 = data.get("audio_base64", "")
+        logger.info("✅ Sarvam TTS generated successfully")
+        return audio_base64
+    except Exception as e:
+        logger.error(f"❌ Sarvam TTS failed: {e}")
+        return ""
 
 # --------------------------------------------------
-# EXOML (MINIMAL + SAFE)
+# EXOML
 # --------------------------------------------------
 @app.get("/exoml")
 @app.post("/exoml")
-async def exoml(background_tasks: BackgroundTasks):
+async def exoml():
     logger.info("🎤 EXOML HIT — CALL CONNECTED")
 
-    xml = """<?xml version="1.0" encoding="UTF-8"?>
+    welcome_text = (
+        "Namaste. Welcome to Rupeek gold loans. "
+        "We offer instant gold loans up to seventy five percent of your gold value. "
+        "Press 1 for more details."
+    )
+
+    # Generate dynamic audio
+    audio_base64 = await asyncio.to_thread(generate_sarvam_audio, welcome_text)
+
+    if audio_base64:
+        # Use <Play> with base64 audio
+        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say language="en-IN">
-        Namaste. Welcome to Rupeek gold loans.
-    </Say>
-    <Pause length="1"/>
-    <Say language="en-IN">
-        We offer instant gold loans up to seventy five percent of your gold value.
-    </Say>
-    <Pause length="1"/>
+    <Play>data:audio/wav;base64,{audio_base64}</Play>
     <Gather input="dtmf"
             timeout="10"
             finishOnKey="#"
-            action="https://ai-calling-somil.onrender.com/collect">
+            action="{PUBLIC_HOSTNAME}/collect">
         <Say language="en-IN">
             Press 1 for more details.
         </Say>
     </Gather>
 </Response>
 """
-
-    # Start minimal echo in background
-    ws_url = "wss://your-ngrok-url.ngrok-free.app"  # Replace with your ngrok WSS URL
-    background_tasks.add_task(start_echo, ws_url)
+    else:
+        # Fallback using <Say>
+        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say language="en-IN">{welcome_text}</Say>
+    <Gather input="dtmf"
+            timeout="10"
+            finishOnKey="#"
+            action="{PUBLIC_HOSTNAME}/collect">
+        <Say language="en-IN">
+            Press 1 for more details.
+        </Say>
+    </Gather>
+</Response>
+"""
 
     return Response(content=xml, media_type="application/xml")
 
@@ -199,7 +200,7 @@ async def call_status(request: Request):
     return Response(content="OK", media_type="text/plain")
 
 # --------------------------------------------------
-# DIAL (EXOTEL connect.json)
+# DIAL
 # --------------------------------------------------
 @app.post("/dial")
 async def dial(request: DialRequest):
@@ -221,8 +222,8 @@ async def dial(request: DialRequest):
     url = f"https://api.exotel.com/v1/Accounts/{EXOTEL_SID}/Calls/connect.json"
 
     payload = {
-        "From": request.from_,                 # USER
-        "CallerId": EXOTEL_FROM_NUMBER,        # EXOTEL NUMBER
+        "From": request.from_,
+        "CallerId": EXOTEL_FROM_NUMBER,
         "Url": f"{PUBLIC_HOSTNAME}/exoml",
         "StatusCallback": f"{PUBLIC_HOSTNAME}/call-status",
     }
