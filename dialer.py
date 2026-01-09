@@ -51,7 +51,7 @@ def make_outbound_call(
 # --- TEST BLOCK ---
 if __name__ == "__main__":
     # 1. Update Customer Number
-    CUSTOMER_NUMBER = "07908120920"
+    CUSTOMER_NUMBER = "06304515430"
     EXOPHONE_NUMBER = "08069489493"
     
     # 2. Construct Full URL
