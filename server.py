@@ -1,4 +1,4 @@
-print("🚀 STARTING SERVER V6.1 - EXOTEL VOICEBOT (RENDER SAFE)")
+print("🚀 STARTING SERVER V8.0 - EXOTEL VOICEBOT (μ-LAW RENDER SAFE)")
 
 import os
 import json
@@ -15,13 +15,15 @@ import uvicorn
 # LOAD ENV
 # --------------------------------------------------
 load_dotenv()
-
 PORT = int(os.getenv("PORT", 10000))
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
-SAMPLE_RATE = 16000
-BYTES_PER_SAMPLE = 2
-MIN_CHUNK_SIZE = 3200  # 100ms
+# --------------------------------------------------
+# AUDIO CONFIG
+# --------------------------------------------------
+INPUT_SAMPLE_RATE = 16000    # Sarvam TTS output
+OUTPUT_SAMPLE_RATE = 8000    # Exotel requirement
+FRAME_SIZE = 160             # 20ms @ 8kHz μ-law
 
 # --------------------------------------------------
 # LOGGING
@@ -48,45 +50,26 @@ async def health():
 FAQS = [
     {
         "keywords": ["interest", "rate"],
-        "answer": (
-            "The interest rate starts from ten percent per annum "
-            "and is personalized for each customer. "
-            "You can check your exact rate in the Rupeek app."
-        )
+        "answer": "Interest rates start from 10% p.a. Check the Rupeek app for your exact rate."
     },
     {
         "keywords": ["pre approved", "limit"],
-        "answer": (
-            "A pre approved limit means you already have a sanctioned "
-            "loan offer with no documents required. "
-            "Please open the Rupeek app to see your exact limit."
-        )
+        "answer": "Pre approved limit means you already have a sanctioned loan offer. Check the Rupeek app for exact limit."
     },
     {
         "keywords": ["gold", "collateral"],
-        "answer": (
-            "This is a personal loan without gold or any collateral. "
-            "The loan is completely unsecured."
-        )
+        "answer": "This is a personal loan without gold or collateral. Fully unsecured."
     },
     {
         "keywords": ["repay", "emi"],
-        "answer": (
-            "Your EMI will be auto deducted from your linked bank account "
-            "on the fifth of every month. "
-            "You can also repay using the Pay Now option in the Rupeek app."
-        )
+        "answer": "EMI auto deducted on 5th of each month. You can also use 'Pay Now' in the app."
     },
 ]
 
-DEFAULT_REPLY = (
-    "I can help you with loan details like interest rate, "
-    "pre approved limit, repayment process, or tenure. "
-    "Please ask your question."
-)
+DEFAULT_REPLY = "I can help you with interest rate, pre approved limit, repayment, or tenure. Please ask your question."
 
 # --------------------------------------------------
-# INTENT MATCHER
+# SIMPLE INTENT MATCHING
 # --------------------------------------------------
 def get_faq_reply(text: str) -> str:
     text = text.lower()
@@ -96,11 +79,35 @@ def get_faq_reply(text: str) -> str:
     return DEFAULT_REPLY
 
 # --------------------------------------------------
-# SARVAM TTS → RAW PCM16
+# PURE PYTHON μ-LAW ENCODER
 # --------------------------------------------------
-def sarvam_tts_to_pcm(text: str) -> bytes:
-    url = "https://api.sarvam.ai/text-to-speech"
+def linear_to_mulaw(sample: int) -> int:
+    """Convert a single 16-bit PCM sample to 8-bit μ-law"""
+    MU = 255
+    MAX = 32767
+    sample = max(-MAX, min(MAX, sample))
+    sign = 0x80 if sample < 0 else 0x00
+    magnitude = abs(sample)
+    magnitude = min(magnitude, MAX)
+    mulaw_sample = int(
+        (1 + MU) * (magnitude / (MAX + 1))
+    )
+    mulaw_sample = 255 - mulaw_sample
+    return mulaw_sample | sign
 
+def pcm16_bytes_to_mulaw(pcm_bytes: bytes) -> bytes:
+    """Convert PCM16 bytes to μ-law bytes"""
+    mulaw = bytearray()
+    for i in range(0, len(pcm_bytes), 2):
+        sample = int.from_bytes(pcm_bytes[i:i+2], "little", signed=True)
+        mulaw.append(linear_to_mulaw(sample))
+    return bytes(mulaw)
+
+# --------------------------------------------------
+# SARVAM TTS → PCM16
+# --------------------------------------------------
+def sarvam_tts_to_pcm16(text: str) -> bytes:
+    url = "https://api.sarvam.ai/text-to-speech"
     payload = {
         "text": text,
         "target_language_code": "en-IN",
@@ -108,59 +115,40 @@ def sarvam_tts_to_pcm(text: str) -> bytes:
         "model": "bulbul:v2",
         "output_audio_codec": "wav"
     }
-
     headers = {
         "api-subscription-key": SARVAM_API_KEY,
         "Content-Type": "application/json"
     }
-
     resp = requests.post(url, json=payload, headers=headers, timeout=15)
     resp.raise_for_status()
-
-    audio_b64 = resp.json()["audios"][0]
-    wav_bytes = base64.b64decode(audio_b64)
-
-    # Strip WAV header → Exotel expects RAW PCM
+    wav_bytes = base64.b64decode(resp.json()["audios"][0])
+    # Strip WAV header (44 bytes)
     return wav_bytes[44:]
 
 # --------------------------------------------------
-# WEBSOCKET ENDPOINT (EXOTEL)
+# WEBSOCKET ENDPOINT
 # --------------------------------------------------
 @app.websocket("/ws")
 async def voicebot_ws(ws: WebSocket):
     await ws.accept()
     logger.info("🎧 Exotel Voicebot connected")
 
-    buffer = b""
-
     try:
-        while True:
-            message = await ws.receive()
+        async for message in ws.iter_bytes():
+            # ------------------------
+            # 🔴 Placeholder STT
+            # ------------------------
+            simulated_text = "interest rate"
+            logger.info(f"🗣 Detected text: {simulated_text}")
+            reply_text = get_faq_reply(simulated_text)
+            logger.info(f"🤖 Bot reply: {reply_text}")
 
-            if "bytes" in message:
-                buffer += message["bytes"]
+            pcm16 = await asyncio.to_thread(sarvam_tts_to_pcm16, reply_text)
+            mulaw_bytes = pcm16_bytes_to_mulaw(pcm16)
 
-                if len(buffer) >= MIN_CHUNK_SIZE:
-                    buffer = buffer[MIN_CHUNK_SIZE:]
-
-                    # 🔴 Replace with real STT later
-                    simulated_text = "interest rate"
-                    logger.info(f"🗣 Detected text: {simulated_text}")
-
-                    reply_text = get_faq_reply(simulated_text)
-                    logger.info(f"🤖 Bot reply: {reply_text}")
-
-                    pcm_audio = await asyncio.to_thread(
-                        sarvam_tts_to_pcm, reply_text
-                    )
-
-                    for i in range(0, len(pcm_audio), MIN_CHUNK_SIZE):
-                        await ws.send_bytes(
-                            pcm_audio[i:i + MIN_CHUNK_SIZE]
-                        )
-
-            else:
-                logger.warning("⚠️ Non-binary message ignored")
+            # Stream in 20ms frames
+            for i in range(0, len(mulaw_bytes), FRAME_SIZE):
+                await ws.send_bytes(mulaw_bytes[i:i+FRAME_SIZE])
 
     except WebSocketDisconnect:
         logger.info("🔌 Voicebot disconnected")
@@ -172,9 +160,4 @@ async def voicebot_ws(ws: WebSocket):
 # ENTRYPOINT
 # --------------------------------------------------
 if __name__ == "__main__":
-    uvicorn.run(
-        "server:app",
-        host="0.0.0.0",
-        port=PORT,
-        log_level="info"
-    )
+    uvicorn.run("server:app", host="0.0.0.0", port=PORT, log_level="info")
