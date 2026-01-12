@@ -1,7 +1,6 @@
-print("🚀 STARTING SERVER V8.0 - EXOTEL VOICEBOT (μ-LAW RENDER SAFE)")
+print("🚀 STARTING SERVER V9.0 - EXOTEL VOICEBOT (μ-LAW RENDER SAFE)")
 
 import os
-import json
 import asyncio
 import logging
 import base64
@@ -21,9 +20,9 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 # --------------------------------------------------
 # AUDIO CONFIG
 # --------------------------------------------------
-INPUT_SAMPLE_RATE = 16000    # Sarvam TTS output
-OUTPUT_SAMPLE_RATE = 8000    # Exotel requirement
-FRAME_SIZE = 160             # 20ms @ 8kHz μ-law
+INPUT_SAMPLE_RATE = 16000  # Sarvam TTS output
+OUTPUT_SAMPLE_RATE = 8000  # Exotel μ-law requirement
+FRAME_SIZE = 160           # 20ms @ 8kHz μ-law
 
 # --------------------------------------------------
 # LOGGING
@@ -89,9 +88,7 @@ def linear_to_mulaw(sample: int) -> int:
     sign = 0x80 if sample < 0 else 0x00
     magnitude = abs(sample)
     magnitude = min(magnitude, MAX)
-    mulaw_sample = int(
-        (1 + MU) * (magnitude / (MAX + 1))
-    )
+    mulaw_sample = int((1 + MU) * (magnitude / (MAX + 1)))
     mulaw_sample = 255 - mulaw_sample
     return mulaw_sample | sign
 
@@ -133,26 +130,32 @@ async def voicebot_ws(ws: WebSocket):
     await ws.accept()
     logger.info("🎧 Exotel Voicebot connected")
 
+    responded = False  # reply only once per call
+
     try:
-        async for message in ws.iter_bytes():
-            # ------------------------
-            # 🔴 Placeholder STT
-            # ------------------------
-            simulated_text = "interest rate"
-            logger.info(f"🗣 Detected text: {simulated_text}")
-            reply_text = get_faq_reply(simulated_text)
-            logger.info(f"🤖 Bot reply: {reply_text}")
+        async for chunk in ws.iter_bytes():
+            if not responded:
+                # ------------------------
+                # 🔴 Placeholder STT
+                # ------------------------
+                simulated_text = "interest rate"
+                logger.info(f"🗣 Detected text: {simulated_text}")
 
-            pcm16 = await asyncio.to_thread(sarvam_tts_to_pcm16, reply_text)
-            mulaw_bytes = pcm16_bytes_to_mulaw(pcm16)
+                reply_text = get_faq_reply(simulated_text)
+                logger.info(f"🤖 Bot reply: {reply_text}")
 
-            # Stream in 20ms frames
-            for i in range(0, len(mulaw_bytes), FRAME_SIZE):
-                await ws.send_bytes(mulaw_bytes[i:i+FRAME_SIZE])
+                pcm16 = await asyncio.to_thread(sarvam_tts_to_pcm16, reply_text)
+                mulaw_bytes = pcm16_bytes_to_mulaw(pcm16)
+
+                # Stream in 20ms frames
+                for i in range(0, len(mulaw_bytes), FRAME_SIZE):
+                    await ws.send_bytes(mulaw_bytes[i:i + FRAME_SIZE])
+                    await asyncio.sleep(0.02)  # simulate real-time streaming
+
+                responded = True  # don't repeat
 
     except WebSocketDisconnect:
         logger.info("🔌 Voicebot disconnected")
-
     except Exception as e:
         logger.error(f"❌ WS error: {e}")
 
