@@ -1,105 +1,180 @@
+print("🚀 STARTING SERVER V6.1 - EXOTEL VOICEBOT (RENDER SAFE)")
+
 import os
 import json
 import asyncio
 import logging
+import base64
 import requests
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from dotenv import load_dotenv
 
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import uvicorn
+
+# --------------------------------------------------
+# LOAD ENV
+# --------------------------------------------------
 load_dotenv()
 
-# --------------------
-# CONFIG
-# --------------------
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+PORT = int(os.getenv("PORT", 10000))
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
-SARVAM_TTS_URL = "https://api.sarvam.ai/v1/text-to-speech"
+SAMPLE_RATE = 16000
+BYTES_PER_SAMPLE = 2
+MIN_CHUNK_SIZE = 3200  # 100ms
 
-logging.basicConfig(level=LOG_LEVEL)
+# --------------------------------------------------
+# LOGGING
+# --------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 logger = logging.getLogger("voicebot")
 
+# --------------------------------------------------
+# FASTAPI APP
+# --------------------------------------------------
 app = FastAPI()
 
-# --------------------
-# UTIL: Sarvam TTS → PCM
-# --------------------
-def sarvam_tts(text: str) -> bytes:
-    """
-    Generate 16-bit PCM, 8kHz mono audio for Exotel
-    """
+@app.get("/")
+@app.head("/")
+async def health():
+    return {"status": "ok", "service": "exotel-voicebot"}
+
+# --------------------------------------------------
+# FAQ KNOWLEDGE BASE
+# --------------------------------------------------
+FAQS = [
+    {
+        "keywords": ["interest", "rate"],
+        "answer": (
+            "The interest rate starts from ten percent per annum "
+            "and is personalized for each customer. "
+            "You can check your exact rate in the Rupeek app."
+        )
+    },
+    {
+        "keywords": ["pre approved", "limit"],
+        "answer": (
+            "A pre approved limit means you already have a sanctioned "
+            "loan offer with no documents required. "
+            "Please open the Rupeek app to see your exact limit."
+        )
+    },
+    {
+        "keywords": ["gold", "collateral"],
+        "answer": (
+            "This is a personal loan without gold or any collateral. "
+            "The loan is completely unsecured."
+        )
+    },
+    {
+        "keywords": ["repay", "emi"],
+        "answer": (
+            "Your EMI will be auto deducted from your linked bank account "
+            "on the fifth of every month. "
+            "You can also repay using the Pay Now option in the Rupeek app."
+        )
+    },
+]
+
+DEFAULT_REPLY = (
+    "I can help you with loan details like interest rate, "
+    "pre approved limit, repayment process, or tenure. "
+    "Please ask your question."
+)
+
+# --------------------------------------------------
+# INTENT MATCHER
+# --------------------------------------------------
+def get_faq_reply(text: str) -> str:
+    text = text.lower()
+    for faq in FAQS:
+        if any(k in text for k in faq["keywords"]):
+            return faq["answer"]
+    return DEFAULT_REPLY
+
+# --------------------------------------------------
+# SARVAM TTS → RAW PCM16
+# --------------------------------------------------
+def sarvam_tts_to_pcm(text: str) -> bytes:
+    url = "https://api.sarvam.ai/text-to-speech"
+
     payload = {
         "text": text,
-        "voice": "meera",
-        "sample_rate": 8000,
-        "audio_format": "pcm"
+        "target_language_code": "en-IN",
+        "speaker": "anushka",
+        "model": "bulbul:v2",
+        "output_audio_codec": "wav"
     }
 
     headers = {
-        "Authorization": f"Bearer {SARVAM_API_KEY}",
+        "api-subscription-key": SARVAM_API_KEY,
         "Content-Type": "application/json"
     }
 
-    response = requests.post(
-        SARVAM_TTS_URL,
-        json=payload,
-        headers=headers,
-        timeout=20
-    )
+    resp = requests.post(url, json=payload, headers=headers, timeout=15)
+    resp.raise_for_status()
 
-    response.raise_for_status()
-    return response.content  # RAW PCM bytes
+    audio_b64 = resp.json()["audios"][0]
+    wav_bytes = base64.b64decode(audio_b64)
 
-# --------------------
-# HEALTH
-# --------------------
-@app.get("/")
-def health():
-    return {"status": "ok"}
+    # Strip WAV header → Exotel expects RAW PCM
+    return wav_bytes[44:]
 
-# --------------------
-# WEBSOCKET FOR EXOTEL
-# --------------------
+# --------------------------------------------------
+# WEBSOCKET ENDPOINT (EXOTEL)
+# --------------------------------------------------
 @app.websocket("/ws")
-async def exotel_ws(ws: WebSocket):
+async def voicebot_ws(ws: WebSocket):
     await ws.accept()
-    logger.info("📞 Exotel WebSocket connected")
+    logger.info("🎧 Exotel Voicebot connected")
 
-    greeted = False
+    buffer = b""
 
     try:
         while True:
             message = await ws.receive()
 
-            # ---- TEXT CONTROL FRAMES ----
-            if "text" in message:
-                data = message["text"]
-                logger.debug(f"📩 Control frame: {data}")
+            if "bytes" in message:
+                buffer += message["bytes"]
 
-                # First time Exotel connects → speak greeting
-                if not greeted:
-                    greeted = True
-                    greeting = (
-                        "Hello. This is Rup eek Finance virtual assistant. "
-                        "How can I help you today?"
+                if len(buffer) >= MIN_CHUNK_SIZE:
+                    buffer = buffer[MIN_CHUNK_SIZE:]
+
+                    # 🔴 Replace with real STT later
+                    simulated_text = "interest rate"
+                    logger.info(f"🗣 Detected text: {simulated_text}")
+
+                    reply_text = get_faq_reply(simulated_text)
+                    logger.info(f"🤖 Bot reply: {reply_text}")
+
+                    pcm_audio = await asyncio.to_thread(
+                        sarvam_tts_to_pcm, reply_text
                     )
 
-                    audio = sarvam_tts(greeting)
+                    for i in range(0, len(pcm_audio), MIN_CHUNK_SIZE):
+                        await ws.send_bytes(
+                            pcm_audio[i:i + MIN_CHUNK_SIZE]
+                        )
 
-                    # Send audio in chunks (VERY IMPORTANT)
-                    chunk_size = 320  # 20ms @ 8kHz PCM
-                    for i in range(0, len(audio), chunk_size):
-                        await ws.send_bytes(audio[i:i+chunk_size])
-                        await asyncio.sleep(0.02)
-
-            # ---- AUDIO FROM USER (IGNORE FOR NOW) ----
-            elif "bytes" in message:
-                # User audio received (we're not processing it yet)
-                pass
+            else:
+                logger.warning("⚠️ Non-binary message ignored")
 
     except WebSocketDisconnect:
-        logger.info("📴 Call disconnected")
+        logger.info("🔌 Voicebot disconnected")
 
     except Exception as e:
         logger.error(f"❌ WS error: {e}")
-        await ws.close()
+
+# --------------------------------------------------
+# ENTRYPOINT
+# --------------------------------------------------
+if __name__ == "__main__":
+    uvicorn.run(
+        "server:app",
+        host="0.0.0.0",
+        port=PORT,
+        log_level="info"
+    )
