@@ -136,6 +136,7 @@ async def voicebot_ws(ws: WebSocket):
     try:
         while True:
             message = await ws.receive()
+            logger.info("📨 Received WebSocket frame",message)
 
             # Exotel sends JSON TEXT frames
             if "text" in message:
