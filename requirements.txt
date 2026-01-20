@@ -6,3 +6,4 @@ websockets
 g711
 pydantic
 websockets
+audioop
