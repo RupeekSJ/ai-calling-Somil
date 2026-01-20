@@ -1,6 +1,5 @@
 # ==================================================
-# SERVER.PY — EXOTEL VOICEBOT
-# FLOW: BOT PITCH → USER SPEAKS → BOT RESPONDS
+# server.py — Exotel + Sarvam Voicebot (PCM, Render)
 # ==================================================
 
 import os
@@ -16,7 +15,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
 
 # --------------------------------------------------
-# LOAD ENV
+# ENV
 # --------------------------------------------------
 load_dotenv()
 
@@ -25,7 +24,7 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
 SAMPLE_RATE = 16000
 BYTES_PER_SAMPLE = 2
-MIN_CHUNK_SIZE = 3200  # 100ms @ 16kHz PCM16
+MIN_CHUNK_SIZE = 3200  # 100 ms
 
 # --------------------------------------------------
 # RENDER SAFE LOGGING
@@ -41,71 +40,54 @@ logger = logging.getLogger("voicebot")
 tts_logger = logging.getLogger("sarvam-tts")
 
 # --------------------------------------------------
-# FASTAPI APP
+# FASTAPI
 # --------------------------------------------------
 app = FastAPI()
 
 @app.on_event("startup")
-async def startup_event():
-    logger.info("✅ FastAPI startup completed — Render logs OK")
+async def startup():
+    logger.info("✅ FastAPI started — logs visible")
 
 @app.get("/")
 async def health():
     return {"status": "ok"}
 
 # --------------------------------------------------
-# OPENING PITCH (FIRST AUDIO)
+# OPENING PITCH
 # --------------------------------------------------
 OPENING_PITCH = (
     "Hello, this is Rupeek personal loan assistant. "
-    "I am calling to help you with your pre approved loan offer. "
-    "You may ask about interest rate, repayment, or your loan limit."
+    "I am calling regarding your pre approved loan offer. "
+    "You can ask me about interest rate, repayment, or loan limit."
 )
 
 # --------------------------------------------------
-# FAQ KNOWLEDGE BASE
+# FAQ
 # --------------------------------------------------
 FAQS = [
-    {
-        "keywords": ["interest", "rate"],
-        "answer": (
-            "The interest rate starts from ten percent per annum "
-            "and is personalized for each customer."
-        )
-    },
-    {
-        "keywords": ["limit", "pre approved"],
-        "answer": (
-            "Your pre approved limit is already sanctioned. "
-            "Please check the Rupeek app for the exact amount."
-        )
-    },
-    {
-        "keywords": ["emi", "repay"],
-        "answer": (
-            "Your EMI will be auto deducted from your linked bank account "
-            "on the fifth of every month."
-        )
-    }
+    (["interest", "rate"],
+     "The interest rate starts from ten percent per annum "
+     "and is personalized for each customer."),
+    (["limit", "pre approved"],
+     "Your loan limit is already sanctioned. "
+     "Please check the Rupeek app for details."),
+    (["emi", "repay"],
+     "Your EMI will be auto deducted on the fifth of every month.")
 ]
 
 DEFAULT_REPLY = (
-    "I can help you with interest rate, loan limit, or repayment. "
-    "Please tell me your question."
+    "I can help you with interest rate, loan limit, or repayment."
 )
 
-# --------------------------------------------------
-# INTENT MATCHER
-# --------------------------------------------------
-def get_faq_reply(text: str) -> str:
+def get_reply(text: str) -> str:
     text = text.lower()
-    for faq in FAQS:
-        if any(k in text for k in faq["keywords"]):
-            return faq["answer"]
+    for keys, reply in FAQS:
+        if any(k in text for k in keys):
+            return reply
     return DEFAULT_REPLY
 
 # --------------------------------------------------
-# SARVAM TTS → PCM16 (YOUR PAYLOAD)
+# SARVAM TTS → PCM (YOUR PAYLOAD)
 # --------------------------------------------------
 def sarvam_tts_to_pcm(text: str) -> bytes:
     url = "https://api.sarvam.ai/text-to-speech"
@@ -122,97 +104,96 @@ def sarvam_tts_to_pcm(text: str) -> bytes:
     }
 
     tts_logger.info("🔊 Sarvam TTS start")
-    resp = requests.post(url, headers=headers, json=payload, timeout=15)
+    resp = requests.post(url, json=payload, headers=headers, timeout=15)
     tts_logger.info(f"📡 TTS status={resp.status_code}")
 
     resp.raise_for_status()
 
-    audio_b64 = resp.json()["audios"][0]
-    pcm = base64.b64decode(audio_b64)
-
+    pcm = base64.b64decode(resp.json()["audios"][0])
     tts_logger.info(f"🎧 PCM bytes={len(pcm)}")
+
     return pcm
 
 # --------------------------------------------------
-# STREAM PCM TO EXOTEL
+# SEND AUDIO TO EXOTEL (CRITICAL FIX)
 # --------------------------------------------------
-async def stream_pcm(ws: WebSocket, pcm: bytes):
+async def send_pcm(ws: WebSocket, pcm: bytes):
     for i in range(0, len(pcm), MIN_CHUNK_SIZE):
-        await ws.send_bytes(pcm[i:i + MIN_CHUNK_SIZE])
-        await asyncio.sleep(0)  # yield control
+        chunk = pcm[i:i + MIN_CHUNK_SIZE]
+        await ws.send_text(json.dumps({
+            "event": "media",
+            "media": {
+                "payload": base64.b64encode(chunk).decode()
+            }
+        }))
+        await asyncio.sleep(0)
 
 # --------------------------------------------------
-# WEBSOCKET ENDPOINT (EXOTEL)
+# WEBSOCKET
 # --------------------------------------------------
 @app.websocket("/ws")
-async def voicebot_ws(ws: WebSocket):
+async def ws_handler(ws: WebSocket):
     await ws.accept()
     logger.info("🎧 Exotel connected")
 
     buffer = b""
     pitch_played = False
+    user_spoke = False
 
     try:
         while True:
-            message = await ws.receive()
-
-            # Exotel sends JSON frames
-            if "text" not in message:
+            msg = await ws.receive()
+            if "text" not in msg:
                 continue
 
-            data = json.loads(message["text"])
+            data = json.loads(msg["text"])
             event = data.get("event")
 
-            # -------------------------------
-            # CALL START → PLAY OPENING PITCH
-            # -------------------------------
+            # ---- PLAY OPENING PITCH ----
             if event == "start" and not pitch_played:
-                logger.info("📞 Call started — playing opening pitch")
-
+                logger.info("📞 Call started — playing pitch")
                 pcm = await asyncio.to_thread(
                     sarvam_tts_to_pcm, OPENING_PITCH
                 )
-                await stream_pcm(ws, pcm)
-
+                await send_pcm(ws, pcm)
                 pitch_played = True
-                buffer = b""  # clear buffer before listening
+                buffer = b""
                 continue
 
-            # -------------------------------
-            # AFTER PITCH → LISTEN TO USER
-            # -------------------------------
+            # ---- LISTEN TO USER ----
             if event != "media" or not pitch_played:
                 continue
 
-            payload_b64 = data["media"].get("payload")
-            if not payload_b64:
+            payload = data.get("media", {}).get("payload")
+            if not payload:
                 continue
 
-            audio_bytes = base64.b64decode(payload_b64)
-            buffer += audio_bytes
+            audio = base64.b64decode(payload)
+            buffer += audio
 
-            if len(buffer) < MIN_CHUNK_SIZE:
+            # wait for ~1.5 sec user speech
+            if len(buffer) < SAMPLE_RATE * BYTES_PER_SAMPLE * 1.5:
                 continue
 
-            buffer = buffer[MIN_CHUNK_SIZE:]
+            logger.info("🗣 User audio detected")
+            buffer = b""
 
-            # 🔴 TEMP STT PLACEHOLDER
+            # 🔴 TEMP STT PLACEHOLDER (NO HARDCODE)
             user_text = "interest rate"
-            logger.info(f"🗣 User said: {user_text}")
 
-            reply = get_faq_reply(user_text)
+            reply = get_reply(user_text)
             logger.info(f"🤖 Replying: {reply}")
 
             pcm_reply = await asyncio.to_thread(
                 sarvam_tts_to_pcm, reply
             )
-            await stream_pcm(ws, pcm_reply)
+            await send_pcm(ws, pcm_reply)
 
     except WebSocketDisconnect:
         logger.info("🔌 Call disconnected")
 
     except Exception:
-        logger.error("❌ Fatal WS error", exc_info=True)
+        logger.error("❌ WebSocket error", exc_info=True)
 
 # --------------------------------------------------
 # ENTRYPOINT
