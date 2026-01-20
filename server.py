@@ -1,4 +1,4 @@
-print("🚀 STARTING SERVER V6.1 - EXOTEL VOICEBOT (RENDER SAFE)")
+print("🚀 STARTING SERVER V6.3 - EXOTEL VOICEBOT (SARVAM PCM MODE)")
 
 import os
 import json
@@ -27,10 +27,12 @@ MIN_CHUNK_SIZE = 3200  # 100ms @ 16kHz PCM16
 # LOGGING
 # --------------------------------------------------
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
+
 logger = logging.getLogger("voicebot")
+tts_logger = logging.getLogger("sarvam-tts")
 
 # --------------------------------------------------
 # FASTAPI APP
@@ -96,7 +98,7 @@ def get_faq_reply(text: str) -> str:
     return DEFAULT_REPLY
 
 # --------------------------------------------------
-# SARVAM TTS → RAW PCM16
+# SARVAM TTS → RAW PCM16 (NO WAV)
 # --------------------------------------------------
 def sarvam_tts_to_pcm(text: str) -> bytes:
     url = "https://api.sarvam.ai/text-to-speech"
@@ -104,9 +106,7 @@ def sarvam_tts_to_pcm(text: str) -> bytes:
     payload = {
         "text": text,
         "target_language_code": "en-IN",
-        "speaker": "anushka",
-        "model": "bulbul:v2",
-        "output_audio_codec": "wav"
+        "speech_sample_rate": "16000"
     }
 
     headers = {
@@ -114,14 +114,46 @@ def sarvam_tts_to_pcm(text: str) -> bytes:
         "Content-Type": "application/json"
     }
 
-    resp = requests.post(url, json=payload, headers=headers, timeout=15)
-    resp.raise_for_status()
+    try:
+        tts_logger.info("🔊 Sarvam TTS request started")
+        tts_logger.debug(f"➡️ URL: {url}")
+        tts_logger.debug(
+            f"➡️ Headers: "
+            f"{ {k: ('***' if 'key' in k.lower() else v) for k, v in headers.items()} }"
+        )
+        tts_logger.debug(f"➡️ Payload:\n{json.dumps(payload, indent=2)}")
 
-    audio_b64 = resp.json()["audios"][0]
-    wav_bytes = base64.b64decode(audio_b64)
+        resp = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=15
+        )
 
-    # Strip WAV header (44 bytes) → RAW PCM16
-    return wav_bytes[44:]
+        tts_logger.info(f"📡 HTTP Status: {resp.status_code}")
+        tts_logger.debug(f"📦 Raw Response:\n{resp.text}")
+
+        resp.raise_for_status()
+
+        resp_json = resp.json()
+        tts_logger.debug(
+            f"📦 Parsed JSON:\n{json.dumps(resp_json, indent=2)}"
+        )
+
+        # Sarvam returns base64 PCM16 directly
+        audio_b64 = resp_json["audios"][0]
+        pcm_bytes = base64.b64decode(audio_b64)
+
+        tts_logger.info(
+            f"🎧 PCM received | bytes={len(pcm_bytes)} | "
+            f"duration≈{len(pcm_bytes)/(SAMPLE_RATE*BYTES_PER_SAMPLE):.2f}s"
+        )
+
+        return pcm_bytes
+
+    except Exception:
+        tts_logger.error("❌ Sarvam TTS failed", exc_info=True)
+        raise
 
 # --------------------------------------------------
 # WEBSOCKET ENDPOINT (EXOTEL)
@@ -136,19 +168,17 @@ async def voicebot_ws(ws: WebSocket):
     try:
         while True:
             message = await ws.receive()
-            logger.info("📨 Received WebSocket frame",message)
+            logger.debug(f"📨 WebSocket frame: {message}")
 
-            # Exotel sends JSON TEXT frames
             if "text" in message:
                 try:
                     data = json.loads(message["text"])
                 except json.JSONDecodeError:
-                    logger.warning("⚠️ Invalid JSON received")
+                    logger.warning("⚠️ Invalid JSON frame")
                     continue
 
                 event = data.get("event")
 
-                # Ignore non-media events (start, stop, mark)
                 if event != "media":
                     logger.info(f"ℹ️ Exotel event: {event}")
                     continue
@@ -160,34 +190,39 @@ async def voicebot_ws(ws: WebSocket):
                 audio_bytes = base64.b64decode(payload_b64)
                 buffer += audio_bytes
 
+                logger.debug(
+                    f"🎙 RX audio | chunk={len(audio_bytes)} | buffer={len(buffer)}"
+                )
+
                 if len(buffer) >= MIN_CHUNK_SIZE:
                     buffer = buffer[MIN_CHUNK_SIZE:]
 
-                    # 🔴 TEMP STT (replace with real STT later)
+                    # 🔴 TEMP STT PLACEHOLDER
                     simulated_text = "interest rate"
-                    logger.info(f"🗣 Detected text: {simulated_text}")
+                    logger.info(f"🗣 STT text: {simulated_text}")
 
                     reply_text = get_faq_reply(simulated_text)
-                    logger.info(f"🤖 Bot reply: {reply_text}")
+                    logger.info(f"🤖 Reply text: {reply_text}")
 
                     pcm_audio = await asyncio.to_thread(
                         sarvam_tts_to_pcm, reply_text
                     )
 
-                    # Stream PCM back to Exotel
                     for i in range(0, len(pcm_audio), MIN_CHUNK_SIZE):
-                        await ws.send_bytes(
-                            pcm_audio[i:i + MIN_CHUNK_SIZE]
+                        chunk = pcm_audio[i:i + MIN_CHUNK_SIZE]
+                        await ws.send_bytes(chunk)
+                        logger.debug(
+                            f"📤 TX audio | size={len(chunk)}"
                         )
 
             else:
-                logger.warning("⚠️ Unknown WebSocket frame ignored")
+                logger.warning("⚠️ Unknown WS frame ignored")
 
     except WebSocketDisconnect:
-        logger.info("🔌 Voicebot disconnected")
+        logger.info("🔌 Exotel Voicebot disconnected")
 
-    except Exception as e:
-        logger.error(f"❌ WebSocket error: {e}")
+    except Exception:
+        logger.error("❌ WebSocket fatal error", exc_info=True)
 
 # --------------------------------------------------
 # ENTRYPOINT
@@ -197,5 +232,5 @@ if __name__ == "__main__":
         "server:app",
         host="0.0.0.0",
         port=PORT,
-        log_level="info"
+        log_level="debug"
     )
