@@ -1,6 +1,6 @@
 # ==================================================
-# server.py — Exotel + Sarvam Voicebot
-# Python 3.13 compatible (NO audioop)
+# server.py — Exotel + Sarvam Voicebot (FINAL)
+# Python 3.13 compatible | NO audioop
 # ==================================================
 
 import os
@@ -10,6 +10,8 @@ import logging
 import sys
 import base64
 import requests
+import io
+import struct
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -26,10 +28,10 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 SAMPLE_RATE = 16000
 BYTES_PER_SAMPLE = 2
 MIN_CHUNK_SIZE = 3200  # 100 ms
-SPEECH_THRESHOLD = 500  # tune if needed
+SPEECH_THRESHOLD = 500  # amplitude threshold
 
 # --------------------------------------------------
-# RENDER SAFE LOGGING
+# LOGGING (RENDER SAFE)
 # --------------------------------------------------
 logging.basicConfig(
     level=logging.DEBUG,
@@ -49,7 +51,7 @@ app = FastAPI()
 
 @app.on_event("startup")
 async def startup():
-    logger.info("✅ FastAPI started")
+    logger.info("✅ FastAPI started — Render logs OK")
 
 @app.get("/")
 async def health():
@@ -90,56 +92,91 @@ def get_reply(text: str) -> str:
     return DEFAULT_REPLY
 
 # --------------------------------------------------
-# PURE PYTHON SILENCE DETECTION (NO audioop)
+# PURE PYTHON SILENCE DETECTION
 # --------------------------------------------------
 def is_speech(pcm: bytes) -> bool:
     if not pcm:
         return False
 
-    # PCM16 LE → int samples
     total = 0
     count = 0
 
     for i in range(0, len(pcm) - 1, 2):
-        sample = int.from_bytes(
-            pcm[i:i+2], byteorder="little", signed=True
-        )
+        sample = int.from_bytes(pcm[i:i+2], "little", signed=True)
         total += abs(sample)
         count += 1
 
     if count == 0:
         return False
 
-    avg_amplitude = total / count
-    logger.debug(f"🔈 Avg amplitude={avg_amplitude}")
+    avg_amp = total / count
+    logger.debug(f"🔈 Avg amplitude={avg_amp}")
 
-    return avg_amplitude > SPEECH_THRESHOLD
+    return avg_amp > SPEECH_THRESHOLD
 
 # --------------------------------------------------
-# SARVAM STT (PCM → TEXT)
+# PCM → WAV (FOR SARVAM STT)
+# --------------------------------------------------
+def pcm_to_wav_bytes(pcm: bytes) -> bytes:
+    num_channels = 1
+    bits_per_sample = 16
+    byte_rate = SAMPLE_RATE * num_channels * bits_per_sample // 8
+    block_align = num_channels * bits_per_sample // 8
+    data_size = len(pcm)
+
+    wav = io.BytesIO()
+    wav.write(b"RIFF")
+    wav.write(struct.pack("<I", 36 + data_size))
+    wav.write(b"WAVE")
+
+    wav.write(b"fmt ")
+    wav.write(struct.pack("<I", 16))
+    wav.write(struct.pack("<H", 1))
+    wav.write(struct.pack("<H", num_channels))
+    wav.write(struct.pack("<I", SAMPLE_RATE))
+    wav.write(struct.pack("<I", byte_rate))
+    wav.write(struct.pack("<H", block_align))
+    wav.write(struct.pack("<H", bits_per_sample))
+
+    wav.write(b"data")
+    wav.write(struct.pack("<I", data_size))
+    wav.write(pcm)
+
+    return wav.getvalue()
+
+# --------------------------------------------------
+# SARVAM STT (WAV → TEXT)
 # --------------------------------------------------
 def sarvam_stt_from_pcm(pcm: bytes) -> str:
     stt_logger.info("🎙 Sending audio to Sarvam STT")
 
+    wav_bytes = pcm_to_wav_bytes(pcm)
+
+    files = {
+        "file": ("audio.wav", wav_bytes, "audio/wav")
+    }
+
+    data = {
+        "language_code": "en-IN"
+    }
+
     resp = requests.post(
         "https://api.sarvam.ai/speech-to-text",
         headers={
-            "api-subscription-key": SARVAM_API_KEY,
-            "Content-Type": "application/json"
+            "api-subscription-key": SARVAM_API_KEY
         },
-        json={
-            "audio": base64.b64encode(pcm).decode(),
-            "language_code": "en-IN",
-            "sample_rate": SAMPLE_RATE
-        },
+        files=files,
+        data=data,
         timeout=20
     )
 
     stt_logger.info(f"📡 STT status={resp.status_code}")
+    stt_logger.debug(f"📦 STT raw response={resp.text}")
+
     resp.raise_for_status()
 
     text = resp.json().get("text", "").strip()
-    stt_logger.info(f"📝 Transcription: {text}")
+    stt_logger.info(f"📝 Transcription='{text}'")
 
     return text
 
@@ -167,7 +204,7 @@ def sarvam_tts_to_pcm(text: str) -> bytes:
     return base64.b64decode(resp.json()["audios"][0])
 
 # --------------------------------------------------
-# SEND AUDIO TO EXOTEL (JSON MEDIA)
+# SEND AUDIO TO EXOTEL
 # --------------------------------------------------
 async def send_pcm(ws: WebSocket, pcm: bytes):
     for i in range(0, len(pcm), MIN_CHUNK_SIZE):
@@ -182,7 +219,7 @@ async def send_pcm(ws: WebSocket, pcm: bytes):
         await asyncio.sleep(0)
 
 # --------------------------------------------------
-# WEBSOCKET
+# WEBSOCKET HANDLER
 # --------------------------------------------------
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
@@ -224,11 +261,9 @@ async def ws_handler(ws: WebSocket):
 
             buffer += base64.b64decode(payload)
 
-            # wait ~1s of audio
             if len(buffer) < SAMPLE_RATE * BYTES_PER_SAMPLE:
                 continue
 
-            # silence check
             if not is_speech(buffer):
                 buffer = b""
                 continue
@@ -236,7 +271,6 @@ async def ws_handler(ws: WebSocket):
             logger.info("🗣 User speech detected")
             awaiting_user = False
 
-            # ---- REAL STT ----
             user_text = await asyncio.to_thread(
                 sarvam_stt_from_pcm, buffer
             )
@@ -247,7 +281,7 @@ async def ws_handler(ws: WebSocket):
                 continue
 
             reply = get_reply(user_text)
-            logger.info(f"🤖 Reply: {reply}")
+            logger.info(f"🤖 Replying: {reply}")
 
             pcm_reply = await asyncio.to_thread(
                 sarvam_tts_to_pcm, reply
