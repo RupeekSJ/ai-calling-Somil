@@ -1,5 +1,5 @@
 # ==================================================
-# server.py — Exotel + Sarvam Voicebot (PCM, Render)
+# server.py — Exotel + Sarvam Voicebot (REAL STT + TTS)
 # ==================================================
 
 import os
@@ -9,6 +9,7 @@ import logging
 import sys
 import base64
 import requests
+import audioop
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -25,9 +26,10 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 SAMPLE_RATE = 16000
 BYTES_PER_SAMPLE = 2
 MIN_CHUNK_SIZE = 3200  # 100 ms
+SPEECH_THRESHOLD = 500
 
 # --------------------------------------------------
-# RENDER SAFE LOGGING
+# LOGGING (RENDER SAFE)
 # --------------------------------------------------
 logging.basicConfig(
     level=logging.DEBUG,
@@ -38,6 +40,7 @@ logging.basicConfig(
 
 logger = logging.getLogger("voicebot")
 tts_logger = logging.getLogger("sarvam-tts")
+stt_logger = logging.getLogger("sarvam-stt")
 
 # --------------------------------------------------
 # FASTAPI
@@ -46,11 +49,7 @@ app = FastAPI()
 
 @app.on_event("startup")
 async def startup():
-    logger.info("✅ FastAPI started — logs visible")
-
-@app.get("/")
-async def health():
-    return {"status": "ok"}
+    logger.info("✅ FastAPI started")
 
 # --------------------------------------------------
 # OPENING PITCH
@@ -58,7 +57,7 @@ async def health():
 OPENING_PITCH = (
     "Hello, this is Rupeek personal loan assistant. "
     "I am calling regarding your pre approved loan offer. "
-    "You can ask me about interest rate, repayment, or loan limit."
+    "You may ask about interest rate, repayment, or loan limit."
 )
 
 # --------------------------------------------------
@@ -70,7 +69,7 @@ FAQS = [
      "and is personalized for each customer."),
     (["limit", "pre approved"],
      "Your loan limit is already sanctioned. "
-     "Please check the Rupeek app for details."),
+     "Please check the Rupeek app."),
     (["emi", "repay"],
      "Your EMI will be auto deducted on the fifth of every month.")
 ]
@@ -87,43 +86,74 @@ def get_reply(text: str) -> str:
     return DEFAULT_REPLY
 
 # --------------------------------------------------
-# SARVAM TTS → PCM (YOUR PAYLOAD)
+# SILENCE DETECTION
 # --------------------------------------------------
-def sarvam_tts_to_pcm(text: str) -> bytes:
-    url = "https://api.sarvam.ai/text-to-speech"
+def is_speech(pcm: bytes) -> bool:
+    rms = audioop.rms(pcm, BYTES_PER_SAMPLE)
+    return rms > SPEECH_THRESHOLD
 
-    payload = {
-        "text": text,
-        "target_language_code": "en-IN",
-        "speech_sample_rate": "16000"
-    }
+# --------------------------------------------------
+# SARVAM STT (PCM → TEXT)
+# --------------------------------------------------
+def sarvam_stt_from_pcm(pcm: bytes) -> str:
+    """
+    Sends user audio to Sarvam STT and returns transcription
+    """
+    stt_logger.info("🎙 Sending audio to Sarvam STT")
 
-    headers = {
-        "api-subscription-key": SARVAM_API_KEY,
-        "Content-Type": "application/json"
-    }
+    resp = requests.post(
+        "https://api.sarvam.ai/speech-to-text",
+        headers={
+            "api-subscription-key": SARVAM_API_KEY,
+            "Content-Type": "application/json"
+        },
+        json={
+            "audio": base64.b64encode(pcm).decode(),
+            "language_code": "en-IN",
+            "sample_rate": SAMPLE_RATE
+        },
+        timeout=20
+    )
 
-    tts_logger.info("🔊 Sarvam TTS start")
-    resp = requests.post(url, json=payload, headers=headers, timeout=15)
-    tts_logger.info(f"📡 TTS status={resp.status_code}")
-
+    stt_logger.info(f"📡 STT status={resp.status_code}")
     resp.raise_for_status()
 
-    pcm = base64.b64decode(resp.json()["audios"][0])
-    tts_logger.info(f"🎧 PCM bytes={len(pcm)}")
+    text = resp.json().get("text", "").strip()
+    stt_logger.info(f"📝 Transcription: {text}")
 
-    return pcm
+    return text
 
 # --------------------------------------------------
-# SEND AUDIO TO EXOTEL (CRITICAL FIX)
+# SARVAM TTS (TEXT → PCM)
+# --------------------------------------------------
+def sarvam_tts_to_pcm(text: str) -> bytes:
+    resp = requests.post(
+        "https://api.sarvam.ai/text-to-speech",
+        headers={
+            "api-subscription-key": SARVAM_API_KEY,
+            "Content-Type": "application/json"
+        },
+        json={
+            "text": text,
+            "target_language_code": "en-IN",
+            "speech_sample_rate": "16000"
+        },
+        timeout=15
+    )
+    resp.raise_for_status()
+    return base64.b64decode(resp.json()["audios"][0])
+
+# --------------------------------------------------
+# SEND AUDIO TO EXOTEL
 # --------------------------------------------------
 async def send_pcm(ws: WebSocket, pcm: bytes):
     for i in range(0, len(pcm), MIN_CHUNK_SIZE):
-        chunk = pcm[i:i + MIN_CHUNK_SIZE]
         await ws.send_text(json.dumps({
             "event": "media",
             "media": {
-                "payload": base64.b64encode(chunk).decode()
+                "payload": base64.b64encode(
+                    pcm[i:i + MIN_CHUNK_SIZE]
+                ).decode()
             }
         }))
         await asyncio.sleep(0)
@@ -138,7 +168,7 @@ async def ws_handler(ws: WebSocket):
 
     buffer = b""
     pitch_played = False
-    user_spoke = False
+    awaiting_user = False
 
     try:
         while True:
@@ -149,7 +179,7 @@ async def ws_handler(ws: WebSocket):
             data = json.loads(msg["text"])
             event = data.get("event")
 
-            # ---- PLAY OPENING PITCH ----
+            # ---- PLAY PITCH ----
             if event == "start" and not pitch_played:
                 logger.info("📞 Call started — playing pitch")
                 pcm = await asyncio.to_thread(
@@ -157,37 +187,51 @@ async def ws_handler(ws: WebSocket):
                 )
                 await send_pcm(ws, pcm)
                 pitch_played = True
+                awaiting_user = True
                 buffer = b""
                 continue
 
-            # ---- LISTEN TO USER ----
-            if event != "media" or not pitch_played:
+            # ---- LISTEN ----
+            if event != "media" or not awaiting_user:
                 continue
 
             payload = data.get("media", {}).get("payload")
             if not payload:
                 continue
 
-            audio = base64.b64decode(payload)
-            buffer += audio
+            buffer += base64.b64decode(payload)
 
-            # wait for ~1.5 sec user speech
-            if len(buffer) < SAMPLE_RATE * BYTES_PER_SAMPLE * 1.5:
+            # wait ~1s
+            if len(buffer) < SAMPLE_RATE * BYTES_PER_SAMPLE:
                 continue
 
-            logger.info("🗣 User audio detected")
+            # silence check
+            if not is_speech(buffer):
+                buffer = b""
+                continue
+
+            logger.info("🗣 User speech detected")
+            awaiting_user = False
+
+            # ---- REAL STT ----
+            user_text = await asyncio.to_thread(
+                sarvam_stt_from_pcm, buffer
+            )
             buffer = b""
 
-            # 🔴 TEMP STT PLACEHOLDER (NO HARDCODE)
-            user_text = "interest rate"
+            if not user_text:
+                awaiting_user = True
+                continue
 
             reply = get_reply(user_text)
-            logger.info(f"🤖 Replying: {reply}")
+            logger.info(f"🤖 Reply: {reply}")
 
             pcm_reply = await asyncio.to_thread(
                 sarvam_tts_to_pcm, reply
             )
             await send_pcm(ws, pcm_reply)
+
+            awaiting_user = True
 
     except WebSocketDisconnect:
         logger.info("🔌 Call disconnected")
@@ -199,7 +243,6 @@ async def ws_handler(ws: WebSocket):
 # ENTRYPOINT
 # --------------------------------------------------
 if __name__ == "__main__":
-    logger.info("🚀 Starting server")
     uvicorn.run(
         "server:app",
         host="0.0.0.0",
