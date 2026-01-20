@@ -5,5 +5,3 @@ python-dotenv
 websockets
 g711
 pydantic
-websockets
-audioop
