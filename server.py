@@ -1,8 +1,3 @@
-# ==================================================
-# server.py — Exotel + Sarvam Voicebot (FINAL)
-# Python 3.13 compatible | NO audioop
-# ==================================================
-
 import os
 import json
 import asyncio
@@ -27,11 +22,12 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
 SAMPLE_RATE = 16000
 BYTES_PER_SAMPLE = 2
-MIN_CHUNK_SIZE = 3200  # 100 ms
-SPEECH_THRESHOLD = 500  # amplitude threshold
+MIN_CHUNK_SIZE = 3200
+SPEECH_THRESHOLD = 500
+SILENCE_CHUNKS = 6  # ~600ms silence ends utterance
 
 # --------------------------------------------------
-# LOGGING (RENDER SAFE)
+# LOGGING
 # --------------------------------------------------
 logging.basicConfig(
     level=logging.DEBUG,
@@ -49,141 +45,72 @@ stt_logger = logging.getLogger("sarvam-stt")
 # --------------------------------------------------
 app = FastAPI()
 
-@app.on_event("startup")
-async def startup():
-    logger.info("✅ FastAPI started — Render logs OK")
-
-@app.get("/")
-async def health():
-    return {"status": "ok"}
-
-# --------------------------------------------------
-# OPENING PITCH
-# --------------------------------------------------
-OPENING_PITCH = (
-    "Hello, this is Rupeek personal loan assistant. "
-    "I am calling regarding your pre approved loan offer. "
-    "You may ask about interest rate, repayment, or loan limit."
-)
-
 # --------------------------------------------------
 # FAQ
 # --------------------------------------------------
 FAQS = [
     (["interest", "rate"],
-     "The interest rate starts from ten percent per annum "
-     "and is personalized for each customer."),
+     "The interest rate starts from ten percent per annum and is personalized for each customer."),
     (["limit", "pre approved"],
-     "Your loan limit is already sanctioned. "
-     "Please check the Rupeek app."),
+     "Your loan limit is already sanctioned. Please check the Rupeek app."),
     (["emi", "repay"],
      "Your EMI will be auto deducted on the fifth of every month.")
 ]
-
-DEFAULT_REPLY = (
-    "I can help you with interest rate, loan limit, or repayment."
-)
 
 def get_reply(text: str) -> str:
     text = text.lower()
     for keys, reply in FAQS:
         if any(k in text for k in keys):
             return reply
-    return DEFAULT_REPLY
+    return "I can help you with interest rate, loan limit, or repayment."
 
 # --------------------------------------------------
-# PURE PYTHON SILENCE DETECTION
+# UTILS
 # --------------------------------------------------
 def is_speech(pcm: bytes) -> bool:
-    if not pcm:
-        return False
-
-    total = 0
-    count = 0
-
+    total, count = 0, 0
     for i in range(0, len(pcm) - 1, 2):
-        sample = int.from_bytes(pcm[i:i+2], "little", signed=True)
-        total += abs(sample)
+        s = int.from_bytes(pcm[i:i+2], "little", signed=True)
+        total += abs(s)
         count += 1
-
     if count == 0:
         return False
+    avg = total / count
+    logger.debug(f"🔈 Avg amplitude={avg}")
+    return avg > SPEECH_THRESHOLD
 
-    avg_amp = total / count
-    logger.debug(f"🔈 Avg amplitude={avg_amp}")
-
-    return avg_amp > SPEECH_THRESHOLD
-
-# --------------------------------------------------
-# PCM → WAV (FOR SARVAM STT)
-# --------------------------------------------------
-def pcm_to_wav_bytes(pcm: bytes) -> bytes:
-    num_channels = 1
-    bits_per_sample = 16
-    byte_rate = SAMPLE_RATE * num_channels * bits_per_sample // 8
-    block_align = num_channels * bits_per_sample // 8
-    data_size = len(pcm)
-
-    wav = io.BytesIO()
-    wav.write(b"RIFF")
-    wav.write(struct.pack("<I", 36 + data_size))
-    wav.write(b"WAVE")
-
-    wav.write(b"fmt ")
-    wav.write(struct.pack("<I", 16))
-    wav.write(struct.pack("<H", 1))
-    wav.write(struct.pack("<H", num_channels))
-    wav.write(struct.pack("<I", SAMPLE_RATE))
-    wav.write(struct.pack("<I", byte_rate))
-    wav.write(struct.pack("<H", block_align))
-    wav.write(struct.pack("<H", bits_per_sample))
-
-    wav.write(b"data")
-    wav.write(struct.pack("<I", data_size))
-    wav.write(pcm)
-
-    return wav.getvalue()
+def pcm_to_wav(pcm: bytes) -> bytes:
+    buf = io.BytesIO()
+    buf.write(b"RIFF")
+    buf.write(struct.pack("<I", 36 + len(pcm)))
+    buf.write(b"WAVEfmt ")
+    buf.write(struct.pack("<IHHIIHH", 16, 1, 1, SAMPLE_RATE,
+                           SAMPLE_RATE * 2, 2, 16))
+    buf.write(b"data")
+    buf.write(struct.pack("<I", len(pcm)))
+    buf.write(pcm)
+    return buf.getvalue()
 
 # --------------------------------------------------
-# SARVAM STT (WAV → TEXT)
+# SARVAM
 # --------------------------------------------------
-def sarvam_stt_from_pcm(pcm: bytes) -> str:
-    stt_logger.info("🎙 Sending audio to Sarvam STT")
-
-    wav_bytes = pcm_to_wav_bytes(pcm)
-
-    files = {
-        "file": ("audio.wav", wav_bytes, "audio/wav")
-    }
-
-    data = {
-        "language_code": "en-IN"
-    }
-
+def sarvam_stt(pcm: bytes) -> str:
+    wav = pcm_to_wav(pcm)
     resp = requests.post(
         "https://api.sarvam.ai/speech-to-text",
-        headers={
-            "api-subscription-key": SARVAM_API_KEY
-        },
-        files=files,
-        data=data,
+        headers={"api-subscription-key": SARVAM_API_KEY},
+        files={"file": ("audio.wav", wav, "audio/wav")},
+        data={"language_code": "en-IN"},
         timeout=20
     )
-
     stt_logger.info(f"📡 STT status={resp.status_code}")
-    stt_logger.debug(f"📦 STT raw response={resp.text}")
-
+    stt_logger.debug(f"📦 STT raw={resp.text}")
     resp.raise_for_status()
 
-    text = resp.json().get("text", "").strip()
-    stt_logger.info(f"📝 Transcription='{text}'")
+    # ✅ FIXED: transcript field
+    return resp.json().get("transcript", "").strip()
 
-    return text
-
-# --------------------------------------------------
-# SARVAM TTS (TEXT → PCM)
-# --------------------------------------------------
-def sarvam_tts_to_pcm(text: str) -> bytes:
+def sarvam_tts(text: str) -> bytes:
     resp = requests.post(
         "https://api.sarvam.ai/text-to-speech",
         headers={
@@ -197,15 +124,9 @@ def sarvam_tts_to_pcm(text: str) -> bytes:
         },
         timeout=15
     )
-
-    tts_logger.info(f"🔊 TTS status={resp.status_code}")
     resp.raise_for_status()
-
     return base64.b64decode(resp.json()["audios"][0])
 
-# --------------------------------------------------
-# SEND AUDIO TO EXOTEL
-# --------------------------------------------------
 async def send_pcm(ws: WebSocket, pcm: bytes):
     for i in range(0, len(pcm), MIN_CHUNK_SIZE):
         await ws.send_text(json.dumps({
@@ -219,7 +140,7 @@ async def send_pcm(ws: WebSocket, pcm: bytes):
         await asyncio.sleep(0)
 
 # --------------------------------------------------
-# WEBSOCKET HANDLER
+# WS
 # --------------------------------------------------
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
@@ -227,8 +148,9 @@ async def ws_handler(ws: WebSocket):
     logger.info("🎧 Exotel connected")
 
     buffer = b""
-    pitch_played = False
-    awaiting_user = False
+    speech_buffer = b""
+    silence_count = 0
+    pitch_done = False
 
     try:
         while True:
@@ -239,71 +161,52 @@ async def ws_handler(ws: WebSocket):
             data = json.loads(msg["text"])
             event = data.get("event")
 
-            # ---- PLAY OPENING PITCH ----
-            if event == "start" and not pitch_played:
-                logger.info("📞 Call started — playing pitch")
+            if event == "start" and not pitch_done:
                 pcm = await asyncio.to_thread(
-                    sarvam_tts_to_pcm, OPENING_PITCH
+                    sarvam_tts,
+                    "Hello, this is Rupeek personal loan assistant. "
+                    "You may ask about interest rate, repayment, or loan limit."
                 )
                 await send_pcm(ws, pcm)
-                pitch_played = True
-                awaiting_user = True
-                buffer = b""
+                pitch_done = True
                 continue
 
-            # ---- LISTEN TO USER ----
-            if event != "media" or not awaiting_user:
+            if event != "media":
                 continue
 
-            payload = data.get("media", {}).get("payload")
+            payload = data["media"].get("payload")
             if not payload:
                 continue
 
-            buffer += base64.b64decode(payload)
+            chunk = base64.b64decode(payload)
+            buffer += chunk
 
-            if len(buffer) < SAMPLE_RATE * BYTES_PER_SAMPLE:
+            if len(buffer) < MIN_CHUNK_SIZE:
                 continue
 
-            if not is_speech(buffer):
-                buffer = b""
-                continue
+            frame = buffer[:MIN_CHUNK_SIZE]
+            buffer = buffer[MIN_CHUNK_SIZE:]
 
-            logger.info("🗣 User speech detected")
-            awaiting_user = False
+            if is_speech(frame):
+                speech_buffer += frame
+                silence_count = 0
+            else:
+                silence_count += 1
 
-            user_text = await asyncio.to_thread(
-                sarvam_stt_from_pcm, buffer
-            )
-            buffer = b""
+            # ---- END OF UTTERANCE ----
+            if silence_count >= SILENCE_CHUNKS and speech_buffer:
+                logger.info("🗣 Utterance ended — sending to STT")
+                text = await asyncio.to_thread(sarvam_stt, speech_buffer)
+                speech_buffer = b""
+                silence_count = 0
 
-            if not user_text:
-                awaiting_user = True
-                continue
+                if not text:
+                    continue
 
-            reply = get_reply(user_text)
-            logger.info(f"🤖 Replying: {reply}")
-
-            pcm_reply = await asyncio.to_thread(
-                sarvam_tts_to_pcm, reply
-            )
-            await send_pcm(ws, pcm_reply)
-
-            awaiting_user = True
+                logger.info(f"📝 User said: {text}")
+                reply = get_reply(text)
+                pcm = await asyncio.to_thread(sarvam_tts, reply)
+                await send_pcm(ws, pcm)
 
     except WebSocketDisconnect:
         logger.info("🔌 Call disconnected")
-
-    except Exception:
-        logger.error("❌ WebSocket error", exc_info=True)
-
-# --------------------------------------------------
-# ENTRYPOINT
-# --------------------------------------------------
-if __name__ == "__main__":
-    uvicorn.run(
-        "server:app",
-        host="0.0.0.0",
-        port=PORT,
-        log_level="debug",
-        access_log=True
-    )
