@@ -49,13 +49,52 @@ app = FastAPI()
 # FAQ
 # --------------------------------------------------
 FAQS = [
-    (["interest", "rate"],
-     "The interest rate starts from ten percent per annum and is personalized for each customer."),
-    (["limit", "pre approved"],
-     "Your loan limit is already sanctioned. Please check the Rupeek app."),
-    (["emi", "repay"],
-     "Your EMI will be auto deducted on the fifth of every month.")
+    {
+        "keywords": ["rate", "interest"],
+        "answer": "The interest rate starts from 10% per annum. It’s personalized for every customer based on their profile. You can check your exact rate in the Rupeek app."
+    },
+    {
+        "keywords": ["pre approved", "pre-approved", "limit meaning"],
+        "answer": "A pre-approved limit means you’ve been sanctioned a personal loan offer without any need for documents or additional verification."
+    },
+    {
+        "keywords": ["my limit", "pre approved limit", "how much"],
+        "answer": "Pre-approved limits typically start from ₹30,000 and are customized for every customer. You can view your exact limit by opening the Rupeek app."
+    },
+    {
+        "keywords": ["gold", "collateral"],
+        "answer": "This is a personal loan, completely without gold or any collateral. You can get it instantly with no documentation."
+    },
+    {
+        "keywords": ["repay", "repayment", "emi pay"],
+        "answer": "You can repay through the Pay Now button in the Rupeek app. The EMI will be auto-deducted from your linked bank account on the 5th of every month."
+    },
+    {
+        "keywords": ["tenure", "duration", "months"],
+        "answer": "The minimum tenure is 3 months and the maximum is up to 12 months. Since offers are customized, please open the app to see the tenure and limit applicable to you."
+    },
+    {
+        "keywords": ["process", "how to get", "apply"],
+        "answer": "Simply open the Rupeek app and complete 2-3 simple steps. The loan will be disbursed instantly to your bank account within 30–40 seconds."
+    },
+    {
+        "keywords": ["emi", "monthly"],
+        "answer": "EMI depends on the principal amount and tenure you select. You can calculate your EMI in the Rupeek app before confirming your loan."
+    },
+    {
+        "keywords": ["higher loan", "increase amount"],
+        "answer": "Once you repay your existing loan, you’ll automatically become eligible for a higher loan amount and lower interest rate in the future."
+    },
+    {
+        "keywords": ["processing fee", "charges"],
+        "answer": "The processing fee details are visible in the Rupeek app once you choose your loan amount and tenure."
+    },
+    {
+        "keywords": ["pre close", "foreclose", "close loan"],
+        "answer": "Yes, you can close or pre-close your loan anytime through the Rupeek app as per your convenience."
+    }
 ]
+
 
 def get_reply(text: str) -> str:
     text = text.lower()
