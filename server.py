@@ -35,7 +35,7 @@ PUBLIC_HOSTNAME = os.getenv("PUBLIC_HOSTNAME")
 EXOTEL_ACCOUNT_SID = os.getenv("EXOTEL_ACCOUNT_SID")
 EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
 EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
-EXOTEL_FROM_NUMBER = os.getenv("EXOTEL_FROM_NUMBER")  # EXOTEL NUMBER (FIXED)
+EXOTEL_TO_NUMBER = os.getenv("EXOTEL_TO_NUMBER")  # Exotel virtual number
 
 # Sarvam
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
@@ -89,7 +89,7 @@ def trigger_exotel_call(customer_number: str):
 
     payload = {
         "From": customer_number,          # ✅ CUSTOMER NUMBER (VARIES)
-        "CallerId": EXOTEL_FROM_NUMBER,   # ✅ EXOTEL NUMBER (FIXED)
+        "CallerId": EXOTEL_TO_NUMBER,   # ✅ EXOTEL NUMBER (FIXED)
         "Url": f"{PUBLIC_HOSTNAME}/ws?number={customer_number}"
     }
 
@@ -103,7 +103,7 @@ def trigger_exotel_call(customer_number: str):
 
     logger.info(
         f"📞 Calling {customer_number} | "
-        f"Exotel={EXOTEL_FROM_NUMBER} | "
+        f"Exotel={EXOTEL_TO_NUMBER} | "
         f"Status={response.status_code}"
     )
 
