@@ -78,7 +78,7 @@ def trigger_exotel_call(customer_number: str):
     payload = {
         "From": customer_number,
         "CallerId": EXOTEL_TO_NUMBER,
-        "Url": f"{PUBLIC_HOSTNAME}/exotel-voice?number={customer_number}"
+        "Url": "http://my.exotel.com/rupeekfintech13/exoml/start_voice/1105077"
     }
 
     r = requests.post(
