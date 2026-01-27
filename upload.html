@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Rupeek AI Calling – Upload CSV</title>
+</head>
+<body style="font-family: Arial, sans-serif; padding: 40px;">
+    <h2>Upload customers.csv</h2>
+
+    <form action="/upload-csv" method="post" enctype="multipart/form-data">
+        <input type="file" name="file" accept=".csv" required />
+        <br><br>
+        <button type="submit">Upload & Start Calls</button>
+    </form>
+
+    <p style="margin-top: 30px; color: #555;">
+        CSV format:<br>
+        <code>phone_number,pitch</code>
+    </p>
+</body>
+</html>

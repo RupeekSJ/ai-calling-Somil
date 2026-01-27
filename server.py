@@ -8,16 +8,22 @@ import requests
 import io
 import struct
 import csv
-import threading
 import time
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    WebSocket,
+    WebSocketDisconnect,
+    UploadFile,
+    File
+)
+from fastapi.responses import HTMLResponse
 import uvicorn
 
-# ===============================
+# ==================================================
 # ENV
-# ===============================
+# ==================================================
 load_dotenv()
 
 PORT = int(os.getenv("PORT", 10000))
@@ -29,14 +35,14 @@ PUBLIC_HOSTNAME = os.getenv("PUBLIC_HOSTNAME")
 EXOTEL_ACCOUNT_SID = os.getenv("EXOTEL_ACCOUNT_SID")
 EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
 EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
-EXOTEL_FROM_NUMBER = os.getenv("EXOTEL_FROM_NUMBER")
+EXOTEL_FROM_NUMBER = os.getenv("EXOTEL_FROM_NUMBER")  # EXOTEL NUMBER (FIXED)
 
 # Sarvam
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
-# ===============================
+# ==================================================
 # AUDIO CONFIG
-# ===============================
+# ==================================================
 SAMPLE_RATE = 16000
 MIN_CHUNK_SIZE = 3200
 SPEECH_THRESHOLD = 500
@@ -46,42 +52,45 @@ MIN_SPEECH_MS = 800
 MIN_SPEECH_BYTES = int(SAMPLE_RATE * 2 * (MIN_SPEECH_MS / 1000))
 BOT_COOLDOWN = 2.5
 
-# ===============================
+# ==================================================
 # LOGGING
-# ===============================
+# ==================================================
 logging.basicConfig(
     level=LOG_LEVEL,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
     force=True
 )
-
 logger = logging.getLogger("voicebot")
 
-# ===============================
+# ==================================================
 # FASTAPI
-# ===============================
+# ==================================================
 app = FastAPI()
 
-# ===============================
-# CSV STORE
-# ===============================
+# ==================================================
+# IN-MEMORY STORE
+# ==================================================
+# phone_number -> pitch
 CUSTOMER_PITCH = {}
-CSV_LOADED = False
 
-# ===============================
-# EXOTEL CALL TRIGGER
-# ===============================
-def trigger_exotel_call(phone_number: str):
+# ==================================================
+# WHERE THE ACTUAL CALL IS MADE (curl equivalent)
+# ==================================================
+def trigger_exotel_call(customer_number: str):
+    """
+    This function is equivalent to:
+    curl -X POST https://api.exotel.com/v1/Accounts/.../Calls/connect.json
+    """
     url = (
         f"https://api.exotel.com/v1/Accounts/"
         f"{EXOTEL_ACCOUNT_SID}/Calls/connect.json"
     )
 
     payload = {
-        "From": phone_number,
-        "CallerId": EXOTEL_FROM_NUMBER,
-        "Url": f"{PUBLIC_HOSTNAME}/ws?number={phone_number}"
+        "From": customer_number,          # ✅ CUSTOMER NUMBER (VARIES)
+        "CallerId": EXOTEL_FROM_NUMBER,   # ✅ EXOTEL NUMBER (FIXED)
+        "Url": f"{PUBLIC_HOSTNAME}/ws?number={customer_number}"
     }
 
     response = requests.post(
@@ -92,75 +101,70 @@ def trigger_exotel_call(phone_number: str):
         timeout=10
     )
 
-    logger.info(f"📞 Calling {phone_number} | Status={response.status_code}")
-    logger.debug(response.text)
+    logger.info(
+        f"📞 Calling {customer_number} | "
+        f"Exotel={EXOTEL_FROM_NUMBER} | "
+        f"Status={response.status_code}"
+    )
 
-# ===============================
-# CSV LOADER + AUTO CALL
-# ===============================
-def load_customers_csv(path):
-    global CSV_LOADED
+# ==================================================
+# UPLOAD HTML
+# ==================================================
+@app.get("/", response_class=HTMLResponse)
+def upload_page():
+    with open("upload.html", "r", encoding="utf-8") as f:
+        return f.read()
+
+# ==================================================
+# CSV UPLOAD ENDPOINT
+# ==================================================
+@app.post("/upload-csv")
+async def upload_csv(file: UploadFile = File(...)):
+    if not file.filename.endswith(".csv"):
+        return {"error": "Only CSV files are allowed"}
+
+    content = await file.read()
+    reader = csv.DictReader(content.decode("utf-8").splitlines())
+
     CUSTOMER_PITCH.clear()
 
-    with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            phone = row.get("phone_number")
-            pitch = row.get("pitch")
-            if phone and pitch:
-                CUSTOMER_PITCH[phone.strip()] = pitch.strip()
+    for row in reader:
+        phone = row.get("phone_number")
+        pitch = row.get("pitch")
 
-    CSV_LOADED = True
-    logger.info(f"✅ Loaded {len(CUSTOMER_PITCH)} customers")
+        if phone and pitch:
+            CUSTOMER_PITCH[phone.strip()] = pitch.strip()
 
-    # 🔥 Trigger calls
-    for phone in CUSTOMER_PITCH.keys():
+    if not CUSTOMER_PITCH:
+        return {"error": "CSV empty or invalid"}
+
+    logger.info(f"📂 Uploaded CSV with {len(CUSTOMER_PITCH)} customers")
+
+    # 🔥 Trigger outbound calls
+    for phone in CUSTOMER_PITCH:
         trigger_exotel_call(phone)
-        time.sleep(1)  # Exotel rate safety
+        await asyncio.sleep(1)  # Exotel rate safety
 
-# ===============================
-# TKINTER CSV UPLOADER
-# ===============================
-def start_csv_ui():
-    import tkinter as tk
-    from tkinter import filedialog, messagebox
+    return {
+        "status": "success",
+        "customers": len(CUSTOMER_PITCH),
+        "message": "Calls triggered"
+    }
 
-    root = tk.Tk()
-    root.title("Upload customers.csv")
-    root.geometry("360x130")
-
-    def upload():
-        path = filedialog.askopenfilename(
-            filetypes=[("CSV Files", "*.csv")]
-        )
-        if path:
-            try:
-                load_customers_csv(path)
-                messagebox.showinfo(
-                    "Success",
-                    "CSV uploaded and calls triggered"
-                )
-            except Exception as e:
-                messagebox.showerror("Error", str(e))
-
-    tk.Button(
-        root,
-        text="Upload customers.csv",
-        command=upload,
-        height=2
-    ).pack(pady=30)
-
-    root.mainloop()
-
-# ===============================
-# FAQ / INTENT
-# ===============================
+# ==================================================
+# FAQ / INTENT LOGIC
+# ==================================================
 FAQS = [
-    (["interest", "rate"], "The interest rate starts from ten percent per annum."),
-    (["limit", "pre approved"], "Your loan limit is already sanctioned."),
-    (["emi", "repay"], "Your EMI will be auto deducted on the fifth of every month."),
-    (["yes", "interested"], "Great! I will arrange a callback from our executive."),
-    (["no", "not interested"], "Thank you for your time. Have a great day.")
+    (["interest", "rate"],
+     "The interest rate starts from ten percent per annum."),
+    (["limit", "pre approved"],
+     "Your loan limit is already sanctioned."),
+    (["emi", "repay"],
+     "Your EMI will be auto deducted on the fifth of every month."),
+    (["yes", "interested"],
+     "Great. I will arrange a callback from our executive."),
+    (["no", "not interested"],
+     "Thank you for your time. Have a great day.")
 ]
 
 def get_reply(text: str) -> str:
@@ -170,9 +174,9 @@ def get_reply(text: str) -> str:
             return reply
     return "I can help you with interest rate, loan limit, or repayment."
 
-# ===============================
+# ==================================================
 # AUDIO UTILS
-# ===============================
+# ==================================================
 def is_speech(pcm: bytes) -> bool:
     total, count = 0, 0
     for i in range(0, len(pcm) - 1, 2):
@@ -193,23 +197,23 @@ def pcm_to_wav(pcm: bytes) -> bytes:
     buf.write(pcm)
     return buf.getvalue()
 
-# ===============================
+# ==================================================
 # SARVAM
-# ===============================
+# ==================================================
 def sarvam_stt(pcm: bytes) -> str:
     wav = pcm_to_wav(pcm)
-    resp = requests.post(
+    r = requests.post(
         "https://api.sarvam.ai/speech-to-text",
         headers={"api-subscription-key": SARVAM_API_KEY},
         files={"file": ("audio.wav", wav, "audio/wav")},
         data={"language_code": "en-IN"},
         timeout=20
     )
-    resp.raise_for_status()
-    return resp.json().get("transcript", "").strip()
+    r.raise_for_status()
+    return r.json().get("transcript", "").strip()
 
 def sarvam_tts(text: str) -> bytes:
-    resp = requests.post(
+    r = requests.post(
         "https://api.sarvam.ai/text-to-speech",
         headers={
             "api-subscription-key": SARVAM_API_KEY,
@@ -222,8 +226,8 @@ def sarvam_tts(text: str) -> bytes:
         },
         timeout=15
     )
-    resp.raise_for_status()
-    return base64.b64decode(resp.json()["audios"][0])
+    r.raise_for_status()
+    return base64.b64decode(r.json()["audios"][0])
 
 async def send_pcm(ws, pcm, interrupt_fn):
     for i in range(0, len(pcm), MIN_CHUNK_SIZE):
@@ -233,15 +237,15 @@ async def send_pcm(ws, pcm, interrupt_fn):
             "event": "media",
             "media": {
                 "payload": base64.b64encode(
-                    pcm[i:i+MIN_CHUNK_SIZE]
+                    pcm[i:i + MIN_CHUNK_SIZE]
                 ).decode()
             }
         }))
         await asyncio.sleep(0)
 
-# ===============================
-# WEBSOCKET
-# ===============================
+# ==================================================
+# WEBSOCKET (VOICE BOT)
+# ==================================================
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
     await ws.accept()
@@ -269,6 +273,7 @@ async def ws_handler(ws: WebSocket):
             data = json.loads(msg["text"])
             event = data.get("event")
 
+            # Initial pitch
             if event == "start" and time.time() - last_bot_spoke > BOT_COOLDOWN:
                 bot_speaking = True
                 interrupted = False
@@ -301,8 +306,14 @@ async def ws_handler(ws: WebSocket):
             else:
                 silence_count += 1
 
-            if silence_count >= SILENCE_CHUNKS and len(speech_buffer) >= MIN_SPEECH_BYTES:
-                text = await asyncio.to_thread(sarvam_stt, speech_buffer)
+            if (
+                silence_count >= SILENCE_CHUNKS and
+                len(speech_buffer) >= MIN_SPEECH_BYTES
+            ):
+                text = await asyncio.to_thread(
+                    sarvam_stt,
+                    speech_buffer
+                )
                 speech_buffer = b""
                 silence_count = 0
 
@@ -321,13 +332,8 @@ async def ws_handler(ws: WebSocket):
     except WebSocketDisconnect:
         logger.info("🔌 Call disconnected")
 
-# ===============================
+# ==================================================
 # START
-# ===============================
+# ==================================================
 if __name__ == "__main__":
-    threading.Thread(
-        target=start_csv_ui,
-        daemon=True
-    ).start()
-
     uvicorn.run(app, host="0.0.0.0", port=PORT)
