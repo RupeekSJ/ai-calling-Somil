@@ -50,7 +50,6 @@ SILENCE_CHUNKS = 6
 
 MIN_SPEECH_MS = 800
 MIN_SPEECH_BYTES = int(SAMPLE_RATE * 2 * (MIN_SPEECH_MS / 1000))
-BOT_COOLDOWN = 2.5
 
 # ==================================================
 # LOGGING
@@ -75,21 +74,17 @@ app = FastAPI()
 CUSTOMER_PITCH = {}
 
 # ==================================================
-# WHERE THE ACTUAL CALL IS MADE (curl equivalent)
+# EXOTEL CALL TRIGGER (curl equivalent)
 # ==================================================
 def trigger_exotel_call(customer_number: str):
-    """
-    This function is equivalent to:
-    curl -X POST https://api.exotel.com/v1/Accounts/.../Calls/connect.json
-    """
     url = (
         f"https://api.exotel.com/v1/Accounts/"
         f"{EXOTEL_ACCOUNT_SID}/Calls/connect.json"
     )
 
     payload = {
-        "From": customer_number,          # ✅ CUSTOMER NUMBER (VARIES)
-        "CallerId": EXOTEL_TO_NUMBER,   # ✅ EXOTEL NUMBER (FIXED)
+        "From": customer_number,      # customer number
+        "CallerId": EXOTEL_TO_NUMBER, # Exotel virtual number
         "Url": f"{PUBLIC_HOSTNAME}/ws?number={customer_number}"
     }
 
@@ -116,12 +111,12 @@ def upload_page():
         return f.read()
 
 # ==================================================
-# CSV UPLOAD ENDPOINT
+# CSV UPLOAD
 # ==================================================
 @app.post("/upload-csv")
 async def upload_csv(file: UploadFile = File(...)):
     if not file.filename.endswith(".csv"):
-        return {"error": "Only CSV files are allowed"}
+        return {"error": "Only CSV files allowed"}
 
     content = await file.read()
     reader = csv.DictReader(content.decode("utf-8").splitlines())
@@ -131,7 +126,6 @@ async def upload_csv(file: UploadFile = File(...)):
     for row in reader:
         phone = row.get("phone_number")
         pitch = row.get("pitch")
-
         if phone and pitch:
             CUSTOMER_PITCH[phone.strip()] = pitch.strip()
 
@@ -140,10 +134,9 @@ async def upload_csv(file: UploadFile = File(...)):
 
     logger.info(f"📂 Uploaded CSV with {len(CUSTOMER_PITCH)} customers")
 
-    # 🔥 Trigger outbound calls
     for phone in CUSTOMER_PITCH:
         trigger_exotel_call(phone)
-        await asyncio.sleep(1)  # Exotel rate safety
+        await asyncio.sleep(1)
 
     return {
         "status": "success",
@@ -152,7 +145,7 @@ async def upload_csv(file: UploadFile = File(...)):
     }
 
 # ==================================================
-# FAQ / INTENT LOGIC
+# FAQ / INTENT
 # ==================================================
 FAQS = [
     (["interest", "rate"],
@@ -196,6 +189,10 @@ def pcm_to_wav(pcm: bytes) -> bytes:
     buf.write(struct.pack("<I", len(pcm)))
     buf.write(pcm)
     return buf.getvalue()
+
+def generate_silence_pcm(duration_ms=700):
+    samples = int(SAMPLE_RATE * duration_ms / 1000)
+    return b"\x00\x00" * samples
 
 # ==================================================
 # SARVAM
@@ -250,6 +247,10 @@ async def send_pcm(ws, pcm, interrupt_fn):
 async def ws_handler(ws: WebSocket):
     await ws.accept()
 
+    # 🔥 CRITICAL: keep call alive immediately
+    silence_pcm = generate_silence_pcm(700)
+    await send_pcm(ws, silence_pcm, lambda: False)
+
     phone = ws.query_params.get("number")
     pitch = CUSTOMER_PITCH.get(
         phone,
@@ -262,7 +263,7 @@ async def ws_handler(ws: WebSocket):
 
     bot_speaking = False
     interrupted = False
-    last_bot_spoke = 0
+    pitch_played = False
 
     try:
         while True:
@@ -273,14 +274,14 @@ async def ws_handler(ws: WebSocket):
             data = json.loads(msg["text"])
             event = data.get("event")
 
-            # Initial pitch
-            if event == "start" and time.time() - last_bot_spoke > BOT_COOLDOWN:
+            # 🔥 Play pitch immediately once
+            if not pitch_played:
                 bot_speaking = True
                 interrupted = False
                 pcm = await asyncio.to_thread(sarvam_tts, pitch)
                 await send_pcm(ws, pcm, lambda: interrupted)
                 bot_speaking = False
-                last_bot_spoke = time.time()
+                pitch_played = True
                 continue
 
             if event != "media":
@@ -327,7 +328,6 @@ async def ws_handler(ws: WebSocket):
                 interrupted = False
                 await send_pcm(ws, pcm, lambda: interrupted)
                 bot_speaking = False
-                last_bot_spoke = time.time()
 
     except WebSocketDisconnect:
         logger.info("🔌 Call disconnected")
