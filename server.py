@@ -339,8 +339,8 @@ async def upload_csv(file: UploadFile = File(...)):
             CUSTOMER_PITCH[phone.strip()] = pitch.strip()
             print(CUSTOMER_PITCH)
 
-
     for phone in CUSTOMER_PITCH:
+        logger.info(f"CSV ++U+O++++++++++++++++++++++,{phone}")
         trigger_exotel_call(phone)
         await asyncio.sleep(1)
 
