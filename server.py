@@ -5,8 +5,6 @@ import logging
 import sys
 import base64
 import requests
-import io
-import struct
 import csv
 from dotenv import load_dotenv
 
@@ -31,7 +29,6 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 # ==================================================
 # AUDIO CONFIG
 # ==================================================
-SAMPLE_RATE = 16000
 MIN_CHUNK_SIZE = 3200
 
 # ==================================================
@@ -51,9 +48,9 @@ logger = logging.getLogger("voicebot")
 app = FastAPI()
 
 # ==================================================
-# IN-MEMORY STORES
+# IN-MEMORY STORE
 # ==================================================
-CALLSID_TO_PITCH = {}
+CALLSID_TO_PITCH: dict[str, str] = {}
 
 # ==================================================
 # EXOTEL CALL TRIGGER (VOICEBOT)
@@ -64,7 +61,7 @@ def trigger_exotel_call(customer_number: str, pitch: str):
     payload = {
         "From": customer_number,
         "CallerId": EXOTEL_TO_NUMBER,
-        # 👇 THIS MUST POINT TO YOUR VOICEBOT APP
+        # 🔥 MUST point to Voicebot applet
         "Url": "http://my.exotel.com/rupeekfintech13/exoml/start_voice/1105077"
     }
 
@@ -82,7 +79,7 @@ def trigger_exotel_call(customer_number: str, pitch: str):
     logger.info(f"📞 Call placed → {customer_number} | CallSid={call_sid}")
 
 # ==================================================
-# UPLOAD PAGE
+# HOME
 # ==================================================
 @app.get("/")
 def home():
@@ -101,8 +98,10 @@ async def upload_csv(file: UploadFile = File(...)):
         pitch = row.get("pitch")
 
         if phone and pitch:
+            phone = phone.strip()
+            pitch = pitch.strip()
             logger.info(f"📄 Loaded pitch for {phone}: {pitch}")
-            trigger_exotel_call(phone.strip(), pitch.strip())
+            trigger_exotel_call(phone, pitch)
             await asyncio.sleep(1)
 
     return {"status": "success"}
@@ -132,7 +131,9 @@ async def send_pcm(ws: WebSocket, pcm: bytes):
         await ws.send_text(json.dumps({
             "event": "media",
             "media": {
-                "payload": base64.b64encode(pcm[i:i+MIN_CHUNK_SIZE]).decode()
+                "payload": base64.b64encode(
+                    pcm[i:i + MIN_CHUNK_SIZE]
+                ).decode()
             }
         }))
         await asyncio.sleep(0)
@@ -145,8 +146,8 @@ async def ws_handler(ws: WebSocket):
     await ws.accept()
     logger.info("🎧 Voicebot WS connected")
 
-    pitch = None
     pitch_sent = False
+    call_sid = None
 
     try:
         while True:
@@ -155,9 +156,10 @@ async def ws_handler(ws: WebSocket):
 
             event = data.get("event")
 
-            # 🔥 First media event contains callSid
-            if event == "media" and pitch is None:
+            # 🔥 First media packet → contains callSid
+            if event == "media" and not pitch_sent:
                 call_sid = data.get("callSid")
+
                 pitch = CALLSID_TO_PITCH.get(
                     call_sid,
                     "Hello, this is Rupeek personal loan assistant."
@@ -168,10 +170,19 @@ async def ws_handler(ws: WebSocket):
 
                 pcm = await asyncio.to_thread(sarvam_tts, pitch)
                 await send_pcm(ws, pcm)
+
                 pitch_sent = True
+                continue  # 🔑 DO NOT fall through
+
+            # Always consume media packets to keep call alive
+            if event == "media":
+                continue
 
     except WebSocketDisconnect:
-        logger.info("🔌 Call disconnected")
+        logger.info("🔌 Voicebot disconnected")
+
+    except Exception as e:
+        logger.error(f"❌ WS error: {e}")
 
 # ==================================================
 # START
