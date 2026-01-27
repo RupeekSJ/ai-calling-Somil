@@ -119,7 +119,7 @@ def sarvam_tts(text: str) -> bytes:
             "text": text,
             "target_language_code": "en-IN",
             "speech_sample_rate": "16000",
-            "pace":2.0
+            # "pace":2.0
         },
         timeout=15
     )
