@@ -100,7 +100,7 @@ def exotel_voice(number: str):
 
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Stream url="{ws_url}/ws?number={number}" />
+  <Stream url="{ws_url}/ws" />
 </Response>
 """
 
