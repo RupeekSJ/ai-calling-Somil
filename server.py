@@ -17,7 +17,7 @@ from fastapi import (
     UploadFile,
     File
 )
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 import uvicorn
 
 # ==================================================
@@ -26,7 +26,7 @@ import uvicorn
 load_dotenv()
 
 PORT = int(os.getenv("PORT", 10000))
-PUBLIC_HOSTNAME = os.getenv("PUBLIC_HOSTNAME")
+PUBLIC_HOSTNAME = os.getenv("PUBLIC_HOSTNAME").rstrip("/")
 
 # Exotel
 EXOTEL_ACCOUNT_SID = os.getenv("EXOTEL_ACCOUNT_SID")
@@ -78,7 +78,8 @@ def trigger_exotel_call(customer_number: str):
     payload = {
         "From": customer_number,
         "CallerId": EXOTEL_TO_NUMBER,
-        "Url": f"{PUBLIC_HOSTNAME}/ws?number={customer_number}"
+        # 🔥 IMPORTANT: HTTP VOICE URL, NOT WS
+        "Url": f"{PUBLIC_HOSTNAME}/exotel-voice?number={customer_number}"
     }
 
     r = requests.post(
@@ -90,6 +91,24 @@ def trigger_exotel_call(customer_number: str):
     )
 
     logger.info(f"📞 Call {customer_number} → {r.status_code}")
+
+# ==================================================
+# EXOTEL VOICE URL (CRITICAL)
+# ==================================================
+@app.get("/exotel-voice", response_class=PlainTextResponse)
+def exotel_voice(number: str):
+    """
+    Exotel fetches this URL and expects XML.
+    This XML tells Exotel to open a WebSocket stream.
+    """
+    ws_url = PUBLIC_HOSTNAME.replace("https://", "wss://")
+    xml = f"""
+<Response>
+  <Stream url="{ws_url}/ws?number={number}" />
+</Response>
+"""
+    logger.info(f"📡 Exotel voice hit for {number}")
+    return xml.strip()
 
 # ==================================================
 # UPLOAD PAGE
@@ -208,7 +227,7 @@ async def send_pcm(ws, pcm):
         await asyncio.sleep(0)
 
 # ==================================================
-# WEBSOCKET (OUTBOUND-SAFE FLOW)
+# WEBSOCKET (NOW WILL ACTUALLY RUN)
 # ==================================================
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
@@ -235,12 +254,11 @@ async def ws_handler(ws: WebSocket):
             data = json.loads(msg["text"])
             event = data.get("event")
 
-            # ✅ OUTBOUND FIX: play pitch on FIRST media event
+            # ✅ OUTBOUND: first media triggers pitch
             if event == "media" and not pitch_done:
                 pcm = await asyncio.to_thread(sarvam_tts, pitch)
                 await send_pcm(ws, pcm)
                 pitch_done = True
-                # do NOT continue; allow media flow
 
             if event != "media":
                 continue
