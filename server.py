@@ -21,28 +21,24 @@ load_dotenv()
 
 PORT = int(os.getenv("PORT", 10000))
 
-# Exotel
 EXOTEL_ACCOUNT_SID = os.getenv("EXOTEL_ACCOUNT_SID")
 EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
 EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
 EXOTEL_TO_NUMBER = os.getenv("EXOTEL_TO_NUMBER")
 
-# Sarvam
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
 # ==================================================
-# AUDIO CONFIG (WORKING)
+# AUDIO CONFIG
 # ==================================================
 SAMPLE_RATE = 16000
 MIN_CHUNK_SIZE = 3200
-SPEECH_THRESHOLD = 500
-SILENCE_CHUNKS = 6
 
 # ==================================================
 # LOGGING
 # ==================================================
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
     force=True
@@ -50,25 +46,25 @@ logging.basicConfig(
 logger = logging.getLogger("voicebot")
 
 # ==================================================
-# FASTAPI
+# APP
 # ==================================================
 app = FastAPI()
 
 # ==================================================
-# IN-MEMORY STORE
+# IN-MEMORY STORES
 # ==================================================
-CUSTOMER_PITCH: dict[str, str] = {}
+CALLSID_TO_PITCH = {}
 
 # ==================================================
-# EXOTEL CALL TRIGGER (USING WORKING EXOTEL APP)
+# EXOTEL CALL TRIGGER (VOICEBOT)
 # ==================================================
-def trigger_exotel_call(customer_number: str):
+def trigger_exotel_call(customer_number: str, pitch: str):
     url = f"https://api.exotel.com/v1/Accounts/{EXOTEL_ACCOUNT_SID}/Calls/connect.json"
 
     payload = {
         "From": customer_number,
         "CallerId": EXOTEL_TO_NUMBER,
-        # ✅ Your already working Exotel App
+        # 👇 THIS MUST POINT TO YOUR VOICEBOT APP
         "Url": "http://my.exotel.com/rupeekfintech13/exoml/start_voice/1105077"
     }
 
@@ -78,16 +74,19 @@ def trigger_exotel_call(customer_number: str):
         data=payload,
         timeout=10
     )
+    r.raise_for_status()
 
-    logger.info(f"📞 Call {customer_number} → {r.status_code}")
+    call_sid = r.json()["Call"]["Sid"]
+    CALLSID_TO_PITCH[call_sid] = pitch
+
+    logger.info(f"📞 Call placed → {customer_number} | CallSid={call_sid}")
 
 # ==================================================
 # UPLOAD PAGE
 # ==================================================
-@app.get("/", response_class=HTMLResponse)
-def upload_page():
-    with open("upload.html", "r", encoding="utf-8") as f:
-        return f.read()
+@app.get("/")
+def home():
+    return HTMLResponse(open("upload.html").read())
 
 # ==================================================
 # CSV UPLOAD
@@ -97,76 +96,21 @@ async def upload_csv(file: UploadFile = File(...)):
     content = await file.read()
     reader = csv.DictReader(content.decode().splitlines())
 
-    CUSTOMER_PITCH.clear()
-
     for row in reader:
         phone = row.get("phone_number")
         pitch = row.get("pitch")
 
-        if not phone or not pitch:
-            continue
+        if phone and pitch:
+            logger.info(f"📄 Loaded pitch for {phone}: {pitch}")
+            trigger_exotel_call(phone.strip(), pitch.strip())
+            await asyncio.sleep(1)
 
-        # ✅ strip quotes + whitespace
-        clean_pitch = pitch.strip().strip('"').strip("'")
-
-        CUSTOMER_PITCH[phone.strip()] = clean_pitch
-        logger.info(f"📄 Loaded pitch for {phone}: {clean_pitch}")
-
-    for phone in CUSTOMER_PITCH:
-        trigger_exotel_call(phone)
-        await asyncio.sleep(1)
-
-    return {
-        "status": "success",
-        "customers": len(CUSTOMER_PITCH)
-    }
+    return {"status": "success"}
 
 # ==================================================
-# FAQ
-# ==================================================
-FAQS = [
-    (["interest", "rate"], "The interest rate starts from ten percent per annum."),
-    (["limit", "pre approved"], "Your loan limit is already sanctioned."),
-    (["emi", "repay"], "Your EMI will be auto deducted on the fifth of every month.")
-]
-
-def get_reply(text: str) -> str:
-    text = text.lower()
-    for keys, reply in FAQS:
-        if any(k in text for k in keys):
-            return reply
-    return "I can help you with interest rate, loan limit, or repayment."
-
-# ==================================================
-# AUDIO UTILS (WORKING LOGIC)
-# ==================================================
-def is_speech(pcm: bytes) -> bool:
-    total, count = 0, 0
-    for i in range(0, len(pcm) - 1, 2):
-        s = int.from_bytes(pcm[i:i+2], "little", signed=True)
-        total += abs(s)
-        count += 1
-    return count > 0 and (total / count) > SPEECH_THRESHOLD
-
-def pcm_to_wav(pcm: bytes) -> bytes:
-    buf = io.BytesIO()
-    buf.write(b"RIFF")
-    buf.write(struct.pack("<I", 36 + len(pcm)))
-    buf.write(b"WAVEfmt ")
-    buf.write(struct.pack("<IHHIIHH", 16, 1, 1, SAMPLE_RATE,
-                           SAMPLE_RATE * 2, 2, 16))
-    buf.write(b"data")
-    buf.write(struct.pack("<I", len(pcm)))
-    buf.write(pcm)
-    return buf.getvalue()
-
-# ==================================================
-# SARVAM
+# SARVAM TTS
 # ==================================================
 def sarvam_tts(text: str) -> bytes:
-    if not text:
-        raise ValueError("TTS text is empty")
-
     r = requests.post(
         "https://api.sarvam.ai/text-to-speech",
         headers={
@@ -183,42 +127,48 @@ def sarvam_tts(text: str) -> bytes:
     r.raise_for_status()
     return base64.b64decode(r.json()["audios"][0])
 
-async def send_pcm(ws, pcm):
+async def send_pcm(ws: WebSocket, pcm: bytes):
     for i in range(0, len(pcm), MIN_CHUNK_SIZE):
         await ws.send_text(json.dumps({
             "event": "media",
             "media": {
-                "payload": base64.b64encode(pcm[i:i + MIN_CHUNK_SIZE]).decode()
+                "payload": base64.b64encode(pcm[i:i+MIN_CHUNK_SIZE]).decode()
             }
         }))
         await asyncio.sleep(0)
 
 # ==================================================
-# WEBSOCKET (FINAL, CLEAN)
+# VOICEBOT WEBSOCKET
 # ==================================================
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
     await ws.accept()
-    logger.info("🎧 Exotel connected")
+    logger.info("🎧 Voicebot WS connected")
 
-    # 🔥 Exotel App MUST pass ?number=XXXX
-    phone = ws.query_params.get("number")
-    pitch = CUSTOMER_PITCH.get(phone)
-
-    logger.info(f"☎️ WS number={phone}")
-    logger.info(f"🗣 Pitch={pitch}")
-
-    if not pitch:
-        pitch = "Hello, this is Rupeek personal loan assistant."
+    pitch = None
+    pitch_sent = False
 
     try:
-        # ✅ play pitch immediately
-        pcm = await asyncio.to_thread(sarvam_tts, pitch)
-        await send_pcm(ws, pcm)
-
-        # keep socket alive
         while True:
-            await ws.receive()
+            msg = await ws.receive_text()
+            data = json.loads(msg)
+
+            event = data.get("event")
+
+            # 🔥 First media event contains callSid
+            if event == "media" and pitch is None:
+                call_sid = data.get("callSid")
+                pitch = CALLSID_TO_PITCH.get(
+                    call_sid,
+                    "Hello, this is Rupeek personal loan assistant."
+                )
+
+                logger.info(f"☎️ CallSid={call_sid}")
+                logger.info(f"🗣 Pitch={pitch}")
+
+                pcm = await asyncio.to_thread(sarvam_tts, pitch)
+                await send_pcm(ws, pcm)
+                pitch_sent = True
 
     except WebSocketDisconnect:
         logger.info("🔌 Call disconnected")
