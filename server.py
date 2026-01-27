@@ -132,8 +132,10 @@ async def upload_csv(file: UploadFile = File(...)):
     for row in reader:
         phone = row.get("phone_number")
         pitch = row.get("pitch")
+
         if phone and pitch:
             CUSTOMER_PITCH[phone.strip()] = pitch.strip()
+
 
     for phone in CUSTOMER_PITCH:
         trigger_exotel_call(phone)
@@ -238,7 +240,7 @@ async def ws_handler(ws: WebSocket):
     phone = ws.query_params.get("number")
     pitch = CUSTOMER_PITCH.get(
         phone,
-        "Hello, this is Rupeek personal loan assistant."
+        pitch
     )
 
     buffer = b""
