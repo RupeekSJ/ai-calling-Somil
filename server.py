@@ -65,6 +65,7 @@ app = FastAPI()
 # IN-MEMORY STORE
 # ==================================================
 CUSTOMER_PITCH = {}
+pitch=""
 
 # ==================================================
 # EXOTEL CALL TRIGGER
@@ -133,11 +134,9 @@ async def upload_csv(file: UploadFile = File(...)):
         phone = row.get("phone_number")
         pitch = row.get("pitch")
         logger.info(f"-------1121212--------,{pitch}")
-        def get_pitch():
-            logger.info(f"-------1121212-function--------,{pitch}")
-            return pitch
         if phone and pitch:
             CUSTOMER_PITCH[phone.strip()] = pitch.strip()
+            print(CUSTOMER_PITCH)
 
 
     for phone in CUSTOMER_PITCH:
@@ -157,6 +156,9 @@ FAQS = [
     (["limit", "pre approved"], "Your loan limit is already sanctioned."),
     (["emi", "repay"], "Your EMI will be auto deducted on the fifth of every month.")
 ]
+def get_pitch():
+        logger.info(f"-------1121212-function--------,{pitch}")
+        return pitch
 
 def get_reply(text: str) -> str:
     text = text.lower()
