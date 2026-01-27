@@ -208,7 +208,7 @@ async def send_pcm(ws, pcm):
         await asyncio.sleep(0)
 
 # ==================================================
-# WEBSOCKET (IDENTICAL FLOW TO WORKING CODE)
+# WEBSOCKET (OUTBOUND-SAFE FLOW)
 # ==================================================
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
@@ -235,11 +235,12 @@ async def ws_handler(ws: WebSocket):
             data = json.loads(msg["text"])
             event = data.get("event")
 
-            if event == "start" and not pitch_done:
+            # ✅ OUTBOUND FIX: play pitch on FIRST media event
+            if event == "media" and not pitch_done:
                 pcm = await asyncio.to_thread(sarvam_tts, pitch)
                 await send_pcm(ws, pcm)
                 pitch_done = True
-                continue
+                # do NOT continue; allow media flow
 
             if event != "media":
                 continue
