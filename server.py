@@ -447,9 +447,8 @@ async def ws_handler(ws: WebSocket):
     print("12345543212345",CUSTOMER_PITCH)
     print("12345678765432q",phone)
 
-    pitch = CUSTOMER_PITCH.get(
-        phone
-    )
+    first_number = '7985361213'
+    pitch = data.get(first_number)
     print("12345543212345",pitch)
 
     buffer = b""
