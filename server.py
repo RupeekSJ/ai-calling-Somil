@@ -8,7 +8,6 @@ import requests
 import io
 import struct
 import csv
-import time
 from dotenv import load_dotenv
 
 from fastapi import (
@@ -27,35 +26,30 @@ import uvicorn
 load_dotenv()
 
 PORT = int(os.getenv("PORT", 10000))
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-
 PUBLIC_HOSTNAME = os.getenv("PUBLIC_HOSTNAME")
 
 # Exotel
 EXOTEL_ACCOUNT_SID = os.getenv("EXOTEL_ACCOUNT_SID")
 EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
 EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
-EXOTEL_TO_NUMBER = os.getenv("EXOTEL_TO_NUMBER")  # Exotel virtual number
+EXOTEL_TO_NUMBER = os.getenv("EXOTEL_TO_NUMBER")
 
 # Sarvam
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
 # ==================================================
-# AUDIO CONFIG
+# AUDIO CONFIG (UNCHANGED – WORKING)
 # ==================================================
 SAMPLE_RATE = 16000
 MIN_CHUNK_SIZE = 3200
 SPEECH_THRESHOLD = 500
 SILENCE_CHUNKS = 6
 
-MIN_SPEECH_MS = 800
-MIN_SPEECH_BYTES = int(SAMPLE_RATE * 2 * (MIN_SPEECH_MS / 1000))
-
 # ==================================================
 # LOGGING
 # ==================================================
 logging.basicConfig(
-    level=LOG_LEVEL,
+    level=logging.DEBUG,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
     force=True
@@ -70,11 +64,10 @@ app = FastAPI()
 # ==================================================
 # IN-MEMORY STORE
 # ==================================================
-# phone_number -> pitch
 CUSTOMER_PITCH = {}
 
 # ==================================================
-# EXOTEL CALL TRIGGER (curl equivalent)
+# EXOTEL CALL TRIGGER
 # ==================================================
 def trigger_exotel_call(customer_number: str):
     url = (
@@ -83,12 +76,12 @@ def trigger_exotel_call(customer_number: str):
     )
 
     payload = {
-        "From": customer_number,      # customer number
-        "CallerId": EXOTEL_TO_NUMBER, # Exotel virtual number
+        "From": customer_number,
+        "CallerId": EXOTEL_TO_NUMBER,
         "Url": f"{PUBLIC_HOSTNAME}/ws?number={customer_number}"
     }
 
-    response = requests.post(
+    r = requests.post(
         url,
         auth=(EXOTEL_API_KEY, EXOTEL_API_TOKEN),
         data=payload,
@@ -96,14 +89,10 @@ def trigger_exotel_call(customer_number: str):
         timeout=10
     )
 
-    logger.info(
-        f"📞 Calling {customer_number} | "
-        f"Exotel={EXOTEL_TO_NUMBER} | "
-        f"Status={response.status_code}"
-    )
+    logger.info(f"📞 Call {customer_number} → {r.status_code}")
 
 # ==================================================
-# UPLOAD HTML
+# UPLOAD PAGE
 # ==================================================
 @app.get("/", response_class=HTMLResponse)
 def upload_page():
@@ -115,11 +104,8 @@ def upload_page():
 # ==================================================
 @app.post("/upload-csv")
 async def upload_csv(file: UploadFile = File(...)):
-    if not file.filename.endswith(".csv"):
-        return {"error": "Only CSV files allowed"}
-
     content = await file.read()
-    reader = csv.DictReader(content.decode("utf-8").splitlines())
+    reader = csv.DictReader(content.decode().splitlines())
 
     CUSTOMER_PITCH.clear()
 
@@ -129,35 +115,22 @@ async def upload_csv(file: UploadFile = File(...)):
         if phone and pitch:
             CUSTOMER_PITCH[phone.strip()] = pitch.strip()
 
-    if not CUSTOMER_PITCH:
-        return {"error": "CSV empty or invalid"}
-
-    logger.info(f"📂 Uploaded CSV with {len(CUSTOMER_PITCH)} customers")
-
     for phone in CUSTOMER_PITCH:
         trigger_exotel_call(phone)
         await asyncio.sleep(1)
 
     return {
         "status": "success",
-        "customers": len(CUSTOMER_PITCH),
-        "message": "Calls triggered"
+        "customers": len(CUSTOMER_PITCH)
     }
 
 # ==================================================
-# FAQ / INTENT
+# FAQ
 # ==================================================
 FAQS = [
-    (["interest", "rate"],
-     "The interest rate starts from ten percent per annum."),
-    (["limit", "pre approved"],
-     "Your loan limit is already sanctioned."),
-    (["emi", "repay"],
-     "Your EMI will be auto deducted on the fifth of every month."),
-    (["yes", "interested"],
-     "Great. I will arrange a callback from our executive."),
-    (["no", "not interested"],
-     "Thank you for your time. Have a great day.")
+    (["interest", "rate"], "The interest rate starts from ten percent per annum."),
+    (["limit", "pre approved"], "Your loan limit is already sanctioned."),
+    (["emi", "repay"], "Your EMI will be auto deducted on the fifth of every month.")
 ]
 
 def get_reply(text: str) -> str:
@@ -168,7 +141,7 @@ def get_reply(text: str) -> str:
     return "I can help you with interest rate, loan limit, or repayment."
 
 # ==================================================
-# AUDIO UTILS
+# AUDIO UTILS (UNCHANGED – WORKING)
 # ==================================================
 def is_speech(pcm: bytes) -> bool:
     total, count = 0, 0
@@ -189,10 +162,6 @@ def pcm_to_wav(pcm: bytes) -> bytes:
     buf.write(struct.pack("<I", len(pcm)))
     buf.write(pcm)
     return buf.getvalue()
-
-def generate_silence_pcm(duration_ms=700):
-    samples = int(SAMPLE_RATE * duration_ms / 1000)
-    return b"\x00\x00" * samples
 
 # ==================================================
 # SARVAM
@@ -226,10 +195,8 @@ def sarvam_tts(text: str) -> bytes:
     r.raise_for_status()
     return base64.b64decode(r.json()["audios"][0])
 
-async def send_pcm(ws, pcm, interrupt_fn):
+async def send_pcm(ws, pcm):
     for i in range(0, len(pcm), MIN_CHUNK_SIZE):
-        if interrupt_fn():
-            return
         await ws.send_text(json.dumps({
             "event": "media",
             "media": {
@@ -241,15 +208,12 @@ async def send_pcm(ws, pcm, interrupt_fn):
         await asyncio.sleep(0)
 
 # ==================================================
-# WEBSOCKET (VOICE BOT)
+# WEBSOCKET (IDENTICAL FLOW TO WORKING CODE)
 # ==================================================
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
     await ws.accept()
-
-    # 🔥 CRITICAL: keep call alive immediately
-    silence_pcm = generate_silence_pcm(700)
-    await send_pcm(ws, silence_pcm, lambda: False)
+    logger.info("🎧 Exotel connected")
 
     phone = ws.query_params.get("number")
     pitch = CUSTOMER_PITCH.get(
@@ -260,10 +224,7 @@ async def ws_handler(ws: WebSocket):
     buffer = b""
     speech_buffer = b""
     silence_count = 0
-
-    bot_speaking = False
-    interrupted = False
-    pitch_played = False
+    pitch_done = False
 
     try:
         while True:
@@ -274,14 +235,10 @@ async def ws_handler(ws: WebSocket):
             data = json.loads(msg["text"])
             event = data.get("event")
 
-            # 🔥 Play pitch immediately once
-            if not pitch_played:
-                bot_speaking = True
-                interrupted = False
+            if event == "start" and not pitch_done:
                 pcm = await asyncio.to_thread(sarvam_tts, pitch)
-                await send_pcm(ws, pcm, lambda: interrupted)
-                bot_speaking = False
-                pitch_played = True
+                await send_pcm(ws, pcm)
+                pitch_done = True
                 continue
 
             if event != "media":
@@ -297,24 +254,13 @@ async def ws_handler(ws: WebSocket):
             buffer = buffer[MIN_CHUNK_SIZE:]
 
             if is_speech(frame):
-                if bot_speaking:
-                    interrupted = True
-                    bot_speaking = False
-                    speech_buffer = b""
-                    continue
                 speech_buffer += frame
                 silence_count = 0
             else:
                 silence_count += 1
 
-            if (
-                silence_count >= SILENCE_CHUNKS and
-                len(speech_buffer) >= MIN_SPEECH_BYTES
-            ):
-                text = await asyncio.to_thread(
-                    sarvam_stt,
-                    speech_buffer
-                )
+            if silence_count >= SILENCE_CHUNKS and speech_buffer:
+                text = await asyncio.to_thread(sarvam_stt, speech_buffer)
                 speech_buffer = b""
                 silence_count = 0
 
@@ -323,11 +269,7 @@ async def ws_handler(ws: WebSocket):
 
                 reply = get_reply(text)
                 pcm = await asyncio.to_thread(sarvam_tts, reply)
-
-                bot_speaking = True
-                interrupted = False
-                await send_pcm(ws, pcm, lambda: interrupted)
-                bot_speaking = False
+                await send_pcm(ws, pcm)
 
     except WebSocketDisconnect:
         logger.info("🔌 Call disconnected")
