@@ -124,6 +124,7 @@ def upload_page():
 # ==================================================
 @app.post("/upload-csv")
 async def upload_csv(file: UploadFile = File(...)):
+    global pitch
     content = await file.read()
     reader = csv.DictReader(content.decode().splitlines())
 
@@ -132,7 +133,7 @@ async def upload_csv(file: UploadFile = File(...)):
     for row in reader:
         phone = row.get("phone_number")
         pitch = row.get("pitch")
-
+        logger.info(f"-------1121212--------,{pitch}")
         if phone and pitch:
             CUSTOMER_PITCH[phone.strip()] = pitch.strip()
 
@@ -238,6 +239,7 @@ async def ws_handler(ws: WebSocket):
     logger.info("🎧 Exotel connected")
 
     phone = ws.query_params.get("number")
+    logger.info(f"-------11212121313--------,{pitch}")
     pitch = CUSTOMER_PITCH.get(
         phone,
         pitch
