@@ -6,8 +6,17 @@
 <body style="font-family: Arial, sans-serif; padding: 40px;">
     <h2>Upload customers.csv</h2>
 
-    <form action="/upload-csv" method="post" enctype="multipart/form-data">
-        <input type="file" name="file" accept=".csv" required />
+    <form
+        action="/upload-csv"
+        method="post"
+        enctype="multipart/form-data"
+    >
+        <input
+            type="file"
+            name="file"
+            accept=".csv"
+            required
+        />
         <br><br>
         <button type="submit">Upload & Start Calls</button>
     </form>
