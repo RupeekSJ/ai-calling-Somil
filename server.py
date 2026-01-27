@@ -243,13 +243,13 @@ async def ws_handler(ws: WebSocket):
     logger.info("🎧 Exotel connected")
 
     phone = ws.query_params.get("number")
-    pitch1=get_pitch(pitch)
-    logger.info(f"-------11212121313--------,{pitch1}")
+    print("12345543212345",phone)
+
 
     pitch = CUSTOMER_PITCH.get(
-        phone,
-        pitch1
+        phone
     )
+    print("12345543212345",pitch)
 
     buffer = b""
     speech_buffer = b""
