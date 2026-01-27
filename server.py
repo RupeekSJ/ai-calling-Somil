@@ -134,7 +134,7 @@ async def upload_csv(file: UploadFile = File(...)):
         pitch = row.get("pitch")
         logger.info(f"-------1121212--------,{pitch}")
         def get_pitch():
-            logger.info(f"-------1121212-function--------,{pitch}"
+            logger.info(f"-------1121212-function--------,{pitch}")
             return pitch
         if phone and pitch:
             CUSTOMER_PITCH[phone.strip()] = pitch.strip()
