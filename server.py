@@ -518,7 +518,6 @@ import base64
 import requests
 import io
 import struct
-import time
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
@@ -533,77 +532,107 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 # ==================================================
 # AUDIO CONFIG
 # ==================================================
-SAMPLE_RATE = 16000
+SAMPLE_RATE = 22050
 MIN_CHUNK_SIZE = 3200
 SPEECH_THRESHOLD = 500
 SILENCE_CHUNKS = 6
-MAX_SILENCE_RETRIES = 2
-MAX_CONFUSION_RETRIES = 2
-PAUSE_SECONDS = 0.7  # 👈 natural pause
 
 # ==================================================
-# LOGGING
+# LOGGING (EXTENSIVE)
 # ==================================================
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+    level=logging.DEBUG,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
     force=True
 )
-logger = logging.getLogger("voicebot")
+
+log = logging.getLogger("VOICEBOT")
+flow_log = logging.getLogger("FLOW")
+stt_log = logging.getLogger("STT")
+tts_log = logging.getLogger("TTS")
+flag_log = logging.getLogger("FLAG")
 
 # ==================================================
-# APP
+# FASTAPI
 # ==================================================
 app = FastAPI()
 
 # ==================================================
-# SESSION STATE
+# LANGUAGE CONFIG
 # ==================================================
-SESSIONS = {}
+LANGUAGE = "en-IN"
+VOICE = "shubh"
 
 # ==================================================
-# STEP FLOW
+# EXACT PITCH (UNCHANGED)
 # ==================================================
-STEPS = [
-    "You have a pre approved Rupeek personal loan with zero interest if repaid within the same month. Are you interested?",
-    "Step one. Download the Rupeek app from the Play Store. Say next when done.",
-    "Step two. Complete your KYC using Aadhaar. Say next once completed.",
-    "Step three. Select your loan amount and confirm disbursal. Say done to finish."
+PITCH = (
+    "Hi, my name is Mahesh, calling from Rupeek. "
+    "You have a pre approved personal loan at zero interest — "
+    "means you do not have to pay any interest if you repay the amount within the same month. "
+    "It works like a credit line. "
+    "You can withdraw money whenever you need, and repay only what you use. "
+    "You can even withdraw again every month with zero interest, as long as it is repaid within the month. "
+    "The process is one hundred percent digital, with no income proof and no paperwork required. "
+    "You can receive instant disbursal to your bank account in just sixty seconds. "
+    "With timely repayments, you can boost your CIBIL score and unlock higher limits in future without any interest. "
+    "This is a limited time offer. "
+    "Are you interested?"
+)
+
+# ==================================================
+# FAQ INTENTS (YOUR CONTENT)
+# ==================================================
+FAQS = [
+    (
+        ["loan amount", "eligible", "how much", "limit"],
+        "The loan amount is personalized for each customer. "
+        "You can check your approved limit in the Rupeek app under Click Cash."
+    ),
+    (
+        ["miss payment", "miss repayment", "roi", "interest if miss"],
+        "If the loan repayment is missed, the loan converts to EMI with interest as shown in the app."
+    ),
+    (
+        ["zero interest", "0%", "really zero"],
+        "Yes, there will be no interest if you repay before month end."
+    ),
+    (
+        ["monthly emi", "emi amount"],
+        "EMI depends on the tenure you select. The app shows the exact EMI amount."
+    ),
+    (
+        ["processing fee", "pf", "gst"],
+        "Zero interest applies to the amount you use if you repay within the same month. "
+        "The processing fee is a one time standard charge for instant digital disbursal. "
+        "In credit cards, similar costs are recovered through annual fees and high cash withdrawal charges."
+    ),
+    (
+        ["app shows interest", "32%", "1.45"],
+        "The app shows the standard ROI for EMI. "
+        "If you repay by month end, you do not have to pay any interest."
+    ),
+    (
+        ["repay date", "any date", "month end"],
+        "You will be required to pay the amount by month end for zero interest."
+    ),
+    (
+        ["two lakh", "thirty thousand", "limit reduced"],
+        "Currently based on system checks, your eligible amount is thirty thousand. "
+        "With timely repayments, your eligibility increases automatically in future."
+    ),
 ]
 
 # ==================================================
-# FAQS
+# STEP-BY-STEP PROCESS FLOW
 # ==================================================
-FAQS = {
-    "interest": "The interest rate is zero if you repay the amount within the same month.",
-    "emi": "There is no EMI if you repay within the month. Otherwise EMI depends on tenure.",
-    "repay": "You can repay anytime through the Rupeek app.",
-    "limit": "Your loan limit is already pre approved and visible in the app."
-}
-
-# ==================================================
-# INTENT CLASSIFIER
-# ==================================================
-def classify(text: str):
-    t = text.lower()
-
-    for key in FAQS:
-        if key in t:
-            return ("FAQ", key)
-
-    if any(x in t for x in ["no", "not interested", "stop"]):
-        return ("NO", None)
-    if any(x in t for x in ["yes", "yeah", "ok", "interested"]):
-        return ("YES", None)
-    if any(x in t for x in ["next", "continue"]):
-        return ("NEXT", None)
-    if any(x in t for x in ["repeat", "again"]):
-        return ("REPEAT", None)
-    if any(x in t for x in ["done", "completed"]):
-        return ("DONE", None)
-
-    return ("UNKNOWN", None)
+PROCESS_STEPS = [
+    "Step one. Download the Rupeek app and log in using your registered mobile number.",
+    "Step two. Go to Click Cash and check your pre approved loan limit.",
+    "Step three. Enter the amount you want to withdraw and select repayment option.",
+    "Step four. Complete digital verification and receive money instantly in your bank account."
+]
 
 # ==================================================
 # AUDIO UTILS
@@ -614,8 +643,9 @@ def is_speech(pcm: bytes) -> bool:
         s = int.from_bytes(pcm[i:i+2], "little", signed=True)
         total += abs(s)
         count += 1
-    return count > 0 and (total / count) > SPEECH_THRESHOLD
-
+    avg = total / count if count else 0
+    log.debug(f"Amplitude={avg}")
+    return avg > SPEECH_THRESHOLD
 
 def pcm_to_wav(pcm: bytes) -> bytes:
     buf = io.BytesIO()
@@ -630,66 +660,82 @@ def pcm_to_wav(pcm: bytes) -> bytes:
     return buf.getvalue()
 
 # ==================================================
-# SARVAM
+# SARVAM STT
 # ==================================================
 def sarvam_stt(pcm: bytes) -> str:
     wav = pcm_to_wav(pcm)
-    r = requests.post(
+    resp = requests.post(
         "https://api.sarvam.ai/speech-to-text",
         headers={"api-subscription-key": SARVAM_API_KEY},
         files={"file": ("audio.wav", wav, "audio/wav")},
-        data={"language_code": "en-IN"},
+        data={"language_code": LANGUAGE},
         timeout=20
     )
-    r.raise_for_status()
-    return r.json().get("transcript", "").strip()
+    stt_log.info(f"STT status={resp.status_code}")
+    resp.raise_for_status()
+    text = resp.json().get("transcript", "").strip()
+    stt_log.info(f"STT transcript='{text}'")
+    return text
 
-
-def sarvam_tts(text: str) -> bytes:
-    r = requests.post(
-        "https://api.sarvam.ai/text-to-speech",
+# ==================================================
+# SARVAM STREAMING TTS
+# ==================================================
+def tts_stream(text: str):
+    tts_log.info(f"TTS → {text[:80]}")
+    return requests.post(
+        "https://api.sarvam.ai/text-to-speech/stream",
         headers={
             "api-subscription-key": SARVAM_API_KEY,
             "Content-Type": "application/json"
         },
         json={
             "text": text,
-            "target_language_code": "en-IN",
-            "speech_sample_rate": "16000"
+            "target_language_code": LANGUAGE,
+            "speaker": VOICE,
+            "model": "bulbul:v3-beta",
+            "speech_sample_rate": 22050,
+            "pace": 1.05,
+            "temperature": 0.6,
+            "output_audio_codec": "mp3",
+            "enable_preprocessing": True
         },
-        timeout=15
+        stream=True,
+        timeout=20
     )
-    r.raise_for_status()
-    return base64.b64decode(r.json()["audios"][0])
 
-
-async def send_pcm(ws, pcm):
-    for i in range(0, len(pcm), MIN_CHUNK_SIZE):
-        await ws.send_text(json.dumps({
-            "event": "media",
-            "media": {"payload": base64.b64encode(pcm[i:i+MIN_CHUNK_SIZE]).decode()}
-        }))
-        await asyncio.sleep(0)
+async def send_audio(ws, stream):
+    for chunk in stream.iter_content(chunk_size=8192):
+        if chunk:
+            await ws.send_text(json.dumps({
+                "event": "media",
+                "media": {"payload": base64.b64encode(chunk).decode()}
+            }))
+            await asyncio.sleep(0)
 
 # ==================================================
-# WEBSOCKET
+# INTENT MATCHER
+# ==================================================
+def match_faq(text: str):
+    text = text.lower()
+    for keys, answer in FAQS:
+        if any(k in text for k in keys):
+            return answer
+    return None
+
+# ==================================================
+# WEBSOCKET VOICEBOT
 # ==================================================
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
     await ws.accept()
-    session_id = str(time.time())
-    logger.info(f"🎧 Call connected | {session_id}")
-
-    SESSIONS[session_id] = {
-        "step": 0,
-        "silence": 0,
-        "confusion": 0,
-        "started": False
-    }
+    log.info("📞 CALL CONNECTED")
 
     buffer = b""
     speech_buffer = b""
     silence_count = 0
+    retries = 0
+    step_index = 0
+    stage = "PITCH"
 
     try:
         while True:
@@ -700,20 +746,17 @@ async def ws_handler(ws: WebSocket):
             data = json.loads(msg["text"])
             event = data.get("event")
 
-            if event == "start" and not SESSIONS[session_id]["started"]:
-                pcm = await asyncio.to_thread(sarvam_tts, STEPS[0])
-                await send_pcm(ws, pcm)
-                SESSIONS[session_id]["started"] = True
+            # ---- PLAY PITCH ----
+            if event == "start" and stage == "PITCH":
+                flow_log.info("Playing pitch")
+                await send_audio(ws, tts_stream(PITCH))
+                stage = "INTEREST"
                 continue
 
             if event != "media":
                 continue
 
-            payload = data["media"].get("payload")
-            if not payload:
-                continue
-
-            chunk = base64.b64decode(payload)
+            chunk = base64.b64decode(data["media"]["payload"])
             buffer += chunk
 
             if len(buffer) < MIN_CHUNK_SIZE:
@@ -729,106 +772,54 @@ async def ws_handler(ws: WebSocket):
                 silence_count += 1
 
             if silence_count >= SILENCE_CHUNKS and speech_buffer:
-                text = await asyncio.to_thread(sarvam_stt, speech_buffer)
+                user_text = await asyncio.to_thread(sarvam_stt, speech_buffer)
                 speech_buffer = b""
                 silence_count = 0
 
-                if not text:
-                    SESSIONS[session_id]["silence"] += 1
-                    if SESSIONS[session_id]["silence"] <= MAX_SILENCE_RETRIES:
-                        await asyncio.sleep(PAUSE_SECONDS)
-                        pcm = await asyncio.to_thread(
-                            sarvam_tts,
-                            "Sorry, I didn’t hear that. Please respond."
+                log.info(f"USER SAID → {user_text}")
+
+                if not user_text:
+                    retries += 1
+                elif "no" in user_text.lower():
+                    await send_audio(ws, tts_stream("Thank you for your time. Have a great day."))
+                    break
+                elif "yes" in user_text.lower():
+                    stage = "PROCESS"
+                    step_index = 0
+                    await send_audio(ws, tts_stream(PROCESS_STEPS[step_index]))
+                elif stage == "PROCESS":
+                    if "next" in user_text.lower():
+                        step_index += 1
+                        if step_index < len(PROCESS_STEPS):
+                            await send_audio(ws, tts_stream(PROCESS_STEPS[step_index]))
+                        else:
+                            await send_audio(ws, tts_stream("You are all set. Thank you for choosing Rupeek."))
+                            break
+                    elif "repeat" in user_text.lower():
+                        await send_audio(ws, tts_stream(PROCESS_STEPS[step_index]))
+                else:
+                    faq = match_faq(user_text)
+                    if faq:
+                        await send_audio(ws, tts_stream(faq))
+                        retries = 0
+                    else:
+                        retries += 1
+
+                if retries >= 3:
+                    flag_log.warning("Human intervention required")
+                    await send_audio(
+                        ws,
+                        tts_stream(
+                            "Sorry, I am unable to understand. "
+                            "Our representative will connect with you shortly."
                         )
-                        await send_pcm(ws, pcm)
-                        continue
-
-                    logger.error(f"🚨 Escalation | silence | {session_id}")
-                    pcm = await asyncio.to_thread(
-                        sarvam_tts,
-                        "Sorry, I am unable to understand. Our representative will connect with you shortly."
                     )
-                    await send_pcm(ws, pcm)
                     break
 
-                intent, meta = classify(text)
-                logger.info(f"🗣 {text} → {intent}")
-
-                # ---------- FAQ ----------
-                if intent == "FAQ":
-                    answer = FAQS[meta]
-                    pcm = await asyncio.to_thread(sarvam_tts, answer)
-                    await send_pcm(ws, pcm)
-                    await asyncio.sleep(PAUSE_SECONDS)
-                    pcm = await asyncio.to_thread(
-                        sarvam_tts,
-                        STEPS[SESSIONS[session_id]["step"]]
-                    )
-                    await send_pcm(ws, pcm)
-                    continue
-
-                # ---------- FLOW ----------
-                if intent == "NO":
-                    pcm = await asyncio.to_thread(
-                        sarvam_tts,
-                        "Thank you for your time. Have a great day."
-                    )
-                    await send_pcm(ws, pcm)
-                    break
-
-                if intent in ("YES", "NEXT"):
-                    SESSIONS[session_id]["step"] += 1
-                    if SESSIONS[session_id]["step"] >= len(STEPS):
-                        pcm = await asyncio.to_thread(
-                            sarvam_tts,
-                            "Your process is complete. Thank you."
-                        )
-                        await send_pcm(ws, pcm)
-                        break
-                    pcm = await asyncio.to_thread(
-                        sarvam_tts,
-                        STEPS[SESSIONS[session_id]["step"]]
-                    )
-                    await send_pcm(ws, pcm)
-                    continue
-
-                if intent == "REPEAT":
-                    pcm = await asyncio.to_thread(
-                        sarvam_tts,
-                        STEPS[SESSIONS[session_id]["step"]]
-                    )
-                    await send_pcm(ws, pcm)
-                    continue
-
-                if intent == "DONE":
-                    pcm = await asyncio.to_thread(
-                        sarvam_tts,
-                        "Thank you. Your request is complete."
-                    )
-                    await send_pcm(ws, pcm)
-                    break
-
-                # ---------- UNKNOWN ----------
-                SESSIONS[session_id]["confusion"] += 1
-                if SESSIONS[session_id]["confusion"] > MAX_CONFUSION_RETRIES:
-                    logger.error(f"🚨 Escalation | confusion | {session_id}")
-                    pcm = await asyncio.to_thread(
-                        sarvam_tts,
-                        "I will connect you to a representative for further assistance."
-                    )
-                    await send_pcm(ws, pcm)
-                    break
-
-                await asyncio.sleep(PAUSE_SECONDS)
-                pcm = await asyncio.to_thread(
-                    sarvam_tts,
-                    "Please say yes, next, repeat, or no."
-                )
-                await send_pcm(ws, pcm)
+                await asyncio.sleep(0.8)
 
     except WebSocketDisconnect:
-        logger.info(f"🔌 Call disconnected | {session_id}")
+        log.info("🔌 CALL DISCONNECTED")
 
 # ==================================================
 # START
