@@ -526,112 +526,91 @@ import uvicorn
 # ENV
 # ==================================================
 load_dotenv()
+
 PORT = int(os.getenv("PORT", 10000))
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
-# ==================================================
-# AUDIO CONFIG
-# ==================================================
-SAMPLE_RATE = 16000
-MIN_CHUNK_SIZE = 3200
-SPEECH_THRESHOLD = 500
-SILENCE_CHUNKS = 6
+LANGUAGE = "en-IN"  # en-IN / hi-IN / kn-IN / ta-IN / te-IN
 
 # ==================================================
-# LOGGING (EXTENSIVE)
+# AUDIO CONFIG (EXOTEL SAFE)
+# ==================================================
+SAMPLE_RATE = 16000
+CHUNK_SIZE = 3200        # 100ms PCM
+SILENCE_CHUNKS = 6       # ~600ms
+SPEECH_THRESHOLD = 500
+
+# ==================================================
+# LOGGING
 # ==================================================
 logging.basicConfig(
     level=logging.DEBUG,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
     force=True
 )
-
-log = logging.getLogger("VOICEBOT")
-flow_log = logging.getLogger("FLOW")
-stt_log = logging.getLogger("STT")
-tts_log = logging.getLogger("TTS")
-flag_log = logging.getLogger("FLAG")
+log = logging.getLogger("voicebot")
 
 # ==================================================
-# FASTAPI
+# APP
 # ==================================================
 app = FastAPI()
 
 # ==================================================
-# LANGUAGE CONFIG
+# PITCH
 # ==================================================
-LANGUAGE = "en-IN"
-VOICE = "shubh"
+PITCH_TEXT = """
+Hi, my name is Mahesh, calling from Rupeek.
+
+You have a pre-approved personal loan at zero interest if repaid within the same month.
+It works like a credit line.
+
+The process is 100% digital with no paperwork.
+You can receive instant disbursal in 60 seconds.
+
+With timely repayments, you can boost your CIBIL score.
+
+This is a limited-time offer.
+Are you interested?
+"""
 
 # ==================================================
-# EXACT PITCH (UNCHANGED)
-# ==================================================
-PITCH = (
-    "Hi, my name is Mahesh, calling from Rupeek. "
-    "You have a pre approved personal loan at zero interest — "
-    "means you do not have to pay any interest if you repay the amount within the same month. "
-    "It works like a credit line. "
-    "You can withdraw money whenever you need, and repay only what you use. "
-    "You can even withdraw again every month with zero interest, as long as it is repaid within the month. "
-    "The process is one hundred percent digital, with no income proof and no paperwork required. "
-    "You can receive instant disbursal to your bank account in just sixty seconds. "
-    "With timely repayments, you can boost your CIBIL score and unlock higher limits in future without any interest. "
-    "This is a limited time offer. "
-    "Are you interested?"
-)
-
-# ==================================================
-# FAQ INTENTS (YOUR CONTENT)
+# FAQ INTENTS
 # ==================================================
 FAQS = [
-    (
-        ["loan amount", "eligible", "how much", "limit"],
-        "The loan amount is personalized for each customer. "
-        "You can check your approved limit in the Rupeek app under Click Cash."
-    ),
-    (
-        ["miss payment", "miss repayment", "roi", "interest if miss"],
-        "If the loan repayment is missed, the loan converts to EMI with interest as shown in the app."
-    ),
-    (
-        ["zero interest", "0%", "really zero"],
-        "Yes, there will be no interest if you repay before month end."
-    ),
-    (
-        ["monthly emi", "emi amount"],
-        "EMI depends on the tenure you select. The app shows the exact EMI amount."
-    ),
-    (
-        ["processing fee", "pf", "gst"],
-        "Zero interest applies to the amount you use if you repay within the same month. "
-        "The processing fee is a one time standard charge for instant digital disbursal. "
-        "In credit cards, similar costs are recovered through annual fees and high cash withdrawal charges."
-    ),
-    (
-        ["app shows interest", "32%", "1.45"],
-        "The app shows the standard ROI for EMI. "
-        "If you repay by month end, you do not have to pay any interest."
-    ),
-    (
-        ["repay date", "any date", "month end"],
-        "You will be required to pay the amount by month end for zero interest."
-    ),
-    (
-        ["two lakh", "thirty thousand", "limit reduced"],
-        "Currently based on system checks, your eligible amount is thirty thousand. "
-        "With timely repayments, your eligibility increases automatically in future."
-    ),
+    (["loan amount", "eligible", "limit"],
+     "Your loan amount is personalized. You can check your approved limit in the Rupeek app under Click Cash."),
+
+    (["roi", "interest", "miss payment", "repayment"],
+     "If repayment is missed, the loan converts to EMI with interest as shown in the app."),
+
+    (["zero interest", "0 percent"],
+     "Yes, there is no interest if you repay before month end."),
+
+    (["emi", "monthly"],
+     "EMI depends on the tenure you select. The app shows the exact EMI amount."),
+
+    (["processing fee", "pf"],
+     "Processing fee is a one-time charge for instant disbursal. Unlike credit cards, there is no recurring interest."),
+
+    (["why interest shown"],
+     "The app shows standard EMI interest. If repaid by month end, you pay zero interest."),
+
+    (["repay date"],
+     "To avail zero interest, repayment must be done before month end."),
+
+    (["30,000", "2 lakh"],
+     "Your current eligible amount is 30,000. With timely repayments, your limit increases automatically.")
 ]
 
 # ==================================================
-# STEP-BY-STEP PROCESS FLOW
+# STEP FLOW
 # ==================================================
-PROCESS_STEPS = [
-    "Step one. Download the Rupeek app and log in using your registered mobile number.",
-    "Step two. Go to Click Cash and check your pre approved loan limit.",
-    "Step three. Enter the amount you want to withdraw and select repayment option.",
-    "Step four. Complete digital verification and receive money instantly in your bank account."
+STEPS = [
+    "Step one: Download the Rupeek app from Play Store.",
+    "Step two: Login using your mobile number.",
+    "Step three: Check your Click Cash limit.",
+    "Step four: Withdraw amount and repay before month end for zero interest."
 ]
 
 # ==================================================
@@ -639,51 +618,31 @@ PROCESS_STEPS = [
 # ==================================================
 def is_speech(pcm: bytes) -> bool:
     total, count = 0, 0
-    for i in range(0, len(pcm) - 1, 2):
+    for i in range(0, len(pcm)-1, 2):
         s = int.from_bytes(pcm[i:i+2], "little", signed=True)
         total += abs(s)
         count += 1
-    avg = total / count if count else 0
-    log.debug(f"Amplitude={avg}")
-    return avg > SPEECH_THRESHOLD
+    return count > 0 and (total / count) > SPEECH_THRESHOLD
 
 def pcm_to_wav(pcm: bytes) -> bytes:
     buf = io.BytesIO()
     buf.write(b"RIFF")
     buf.write(struct.pack("<I", 36 + len(pcm)))
     buf.write(b"WAVEfmt ")
-    buf.write(struct.pack("<IHHIIHH", 16, 1, 1, SAMPLE_RATE,
-                           SAMPLE_RATE * 2, 2, 16))
+    buf.write(struct.pack("<IHHIIHH", 16, 1, 1,
+                           SAMPLE_RATE, SAMPLE_RATE*2, 2, 16))
     buf.write(b"data")
     buf.write(struct.pack("<I", len(pcm)))
     buf.write(pcm)
     return buf.getvalue()
 
 # ==================================================
-# SARVAM STT
+# SARVAM
 # ==================================================
-def sarvam_stt(pcm: bytes) -> str:
-    wav = pcm_to_wav(pcm)
-    resp = requests.post(
-        "https://api.sarvam.ai/speech-to-text",
-        headers={"api-subscription-key": SARVAM_API_KEY},
-        files={"file": ("audio.wav", wav, "audio/wav")},
-        data={"language_code": LANGUAGE},
-        timeout=20
-    )
-    stt_log.info(f"STT status={resp.status_code}")
-    resp.raise_for_status()
-    text = resp.json().get("transcript", "").strip()
-    stt_log.info(f"STT transcript='{text}'")
-    return text
-
-# ==================================================
-# SARVAM STREAMING TTS
-# ==================================================
-def tts_stream(text: str):
-    tts_log.info(f"TTS → {text[:80]}")
-    return requests.post(
-        "https://api.sarvam.ai/text-to-speech/stream",
+def sarvam_tts(text: str) -> bytes:
+    log.info(f"TTS → {text[:60]}")
+    r = requests.post(
+        "https://api.sarvam.ai/text-to-speech",
         headers={
             "api-subscription-key": SARVAM_API_KEY,
             "Content-Type": "application/json"
@@ -691,51 +650,54 @@ def tts_stream(text: str):
         json={
             "text": text,
             "target_language_code": LANGUAGE,
-            "speaker": VOICE,
+            "speaker": "shubh",
             "model": "bulbul:v3-beta",
             "speech_sample_rate": 16000,
-            "pace": 1.05,
-            "temperature": 0.6,
-            "output_audio_codec": "mp3",
-            "enable_preprocessing": True
+            "output_audio_codec": "pcm"
         },
-        stream=True,
+        timeout=15
+    )
+    r.raise_for_status()
+    return base64.b64decode(r.json()["audios"][0])
+
+def sarvam_stt(pcm: bytes) -> str:
+    wav = pcm_to_wav(pcm)
+    r = requests.post(
+        "https://api.sarvam.ai/speech-to-text",
+        headers={"api-subscription-key": SARVAM_API_KEY},
+        files={"file": ("audio.wav", wav, "audio/wav")},
+        data={"language_code": LANGUAGE},
         timeout=20
     )
+    r.raise_for_status()
+    return r.json().get("transcript", "").lower().strip()
 
-async def send_audio(ws, stream):
-    for chunk in stream.iter_content(chunk_size=8192):
-        if chunk:
-            await ws.send_text(json.dumps({
-                "event": "media",
-                "media": {"payload": base64.b64encode(chunk).decode()}
-            }))
-            await asyncio.sleep(0)
-
-# ==================================================
-# INTENT MATCHER
-# ==================================================
-def match_faq(text: str):
-    text = text.lower()
-    for keys, answer in FAQS:
-        if any(k in text for k in keys):
-            return answer
-    return None
+async def send_pcm(ws: WebSocket, pcm: bytes):
+    for i in range(0, len(pcm), CHUNK_SIZE):
+        await ws.send_text(json.dumps({
+            "event": "media",
+            "media": {
+                "payload": base64.b64encode(pcm[i:i+CHUNK_SIZE]).decode()
+            }
+        }))
+        await asyncio.sleep(0.02)
 
 # ==================================================
-# WEBSOCKET VOICEBOT
+# WEBSOCKET
 # ==================================================
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
     await ws.accept()
-    log.info("📞 CALL CONNECTED")
+    log.info("🎧 Call connected")
 
     buffer = b""
     speech_buffer = b""
-    silence_count = 0
-    retries = 0
+    silence = 0
+
     step_index = 0
-    stage = "PITCH"
+    retries = 0
+    MAX_RETRIES = 2
+    pitch_done = False
 
     try:
         while True:
@@ -746,11 +708,10 @@ async def ws_handler(ws: WebSocket):
             data = json.loads(msg["text"])
             event = data.get("event")
 
-            # ---- PLAY PITCH ----
-            if event == "start" and stage == "PITCH":
-                flow_log.info("Playing pitch")
-                await send_audio(ws, tts_stream(PITCH))
-                stage = "INTEREST"
+            if event == "start" and not pitch_done:
+                pcm = sarvam_tts(PITCH_TEXT)
+                await send_pcm(ws, pcm)
+                pitch_done = True
                 continue
 
             if event != "media":
@@ -759,67 +720,62 @@ async def ws_handler(ws: WebSocket):
             chunk = base64.b64decode(data["media"]["payload"])
             buffer += chunk
 
-            if len(buffer) < MIN_CHUNK_SIZE:
+            if len(buffer) < CHUNK_SIZE:
                 continue
 
-            frame = buffer[:MIN_CHUNK_SIZE]
-            buffer = buffer[MIN_CHUNK_SIZE:]
+            frame = buffer[:CHUNK_SIZE]
+            buffer = buffer[CHUNK_SIZE:]
 
             if is_speech(frame):
                 speech_buffer += frame
-                silence_count = 0
+                silence = 0
             else:
-                silence_count += 1
+                silence += 1
 
-            if silence_count >= SILENCE_CHUNKS and speech_buffer:
-                user_text = await asyncio.to_thread(sarvam_stt, speech_buffer)
+            if silence >= SILENCE_CHUNKS and speech_buffer:
+                user_text = sarvam_stt(speech_buffer)
                 speech_buffer = b""
-                silence_count = 0
+                silence = 0
 
-                log.info(f"USER SAID → {user_text}")
+                log.info(f"🗣 User: {user_text}")
 
                 if not user_text:
                     retries += 1
-                elif "no" in user_text.lower():
-                    await send_audio(ws, tts_stream("Thank you for your time. Have a great day."))
+                elif "no" in user_text:
+                    pcm = sarvam_tts("Thank you for your time. Have a great day.")
+                    await send_pcm(ws, pcm)
                     break
-                elif "yes" in user_text.lower():
-                    stage = "PROCESS"
-                    step_index = 0
-                    await send_audio(ws, tts_stream(PROCESS_STEPS[step_index]))
-                elif stage == "PROCESS":
-                    if "next" in user_text.lower():
-                        step_index += 1
-                        if step_index < len(PROCESS_STEPS):
-                            await send_audio(ws, tts_stream(PROCESS_STEPS[step_index]))
-                        else:
-                            await send_audio(ws, tts_stream("You are all set. Thank you for choosing Rupeek."))
-                            break
-                    elif "repeat" in user_text.lower():
-                        await send_audio(ws, tts_stream(PROCESS_STEPS[step_index]))
+                elif "yes" in user_text or "interested" in user_text:
+                    pcm = sarvam_tts(STEPS[step_index])
+                    await send_pcm(ws, pcm)
+                elif "next" in user_text:
+                    step_index = min(step_index + 1, len(STEPS)-1)
+                    pcm = sarvam_tts(STEPS[step_index])
+                    await send_pcm(ws, pcm)
+                elif "repeat" in user_text:
+                    pcm = sarvam_tts(STEPS[step_index])
+                    await send_pcm(ws, pcm)
                 else:
-                    faq = match_faq(user_text)
-                    if faq:
-                        await send_audio(ws, tts_stream(faq))
-                        retries = 0
-                    else:
+                    matched = False
+                    for keys, reply in FAQS:
+                        if any(k in user_text for k in keys):
+                            pcm = sarvam_tts(reply)
+                            await send_pcm(ws, pcm)
+                            matched = True
+                            break
+                    if not matched:
                         retries += 1
 
-                if retries >= 3:
-                    flag_log.warning("Human intervention required")
-                    await send_audio(
-                        ws,
-                        tts_stream(
-                            "Sorry, I am unable to understand. "
-                            "Our representative will connect with you shortly."
-                        )
+                if retries > MAX_RETRIES:
+                    log.warning("🚩 Flagged for human intervention")
+                    pcm = sarvam_tts(
+                        "Sorry, I am unable to understand. Our representative will connect with you shortly."
                     )
+                    await send_pcm(ws, pcm)
                     break
 
-                await asyncio.sleep(0.8)
-
     except WebSocketDisconnect:
-        log.info("🔌 CALL DISCONNECTED")
+        log.info("🔌 Call disconnected")
 
 # ==================================================
 # START
