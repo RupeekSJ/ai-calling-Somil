@@ -713,247 +713,184 @@
 # if __name__ == "__main__":
 #     uvicorn.run(app, host="0.0.0.0", port=PORT)
 
+# ================================
+# CONVERSATION STATES
+# ================================
+STATE_GREETING = "greeting"
+STATE_CONFIRM_INTEREST = "confirm_interest"
+STATE_STEP_FLOW = "step_flow"
+STATE_DONE = "done"
+STATE_ESCALATE = "escalate"
 
-import os
-import json
-import asyncio
-import logging
-import sys
-import base64
-import requests
-import io
-import struct
-from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
-import uvicorn
-from openai import OpenAI
-
-# --------------------------------------------------
-# ENV
-# --------------------------------------------------
-load_dotenv()
-
-PORT = int(os.getenv("PORT", 10000))
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
-
-EXOTEL_ACCOUNT_SID = os.getenv("EXOTEL_ACCOUNT_SID")
-EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
-EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
-EXOTEL_TO_NUMBER = os.getenv("EXOTEL_TO_NUMBER")
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-# --------------------------------------------------
-# AUDIO
-# --------------------------------------------------
-SAMPLE_RATE = 16000
-MIN_CHUNK_SIZE = 3200
-SPEECH_THRESHOLD = 500
-SILENCE_CHUNKS = 6
-
-# --------------------------------------------------
-# LOGGING
-# --------------------------------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("voicebot")
-
-# --------------------------------------------------
-# APP
-# --------------------------------------------------
-app = FastAPI()
-
-# --------------------------------------------------
-# IN-MEMORY STATE
-# --------------------------------------------------
-CALL_STATE = {}  # call_id → state
-
-STEPS = [
-    "Step 1: Download the Rupeek app from Play Store.",
-    "Step 2: Complete basic KYC.",
-    "Step 3: Select loan amount and get instant disbursal."
+PROCESS_STEPS = [
+    "Step one: Download the Rupeek app from Play Store or App Store.",
+    "Step two: Complete your basic KYC using Aadhaar.",
+    "Step three: Choose the loan amount and confirm disbursal."
 ]
 
-FAQS = {
-    "interest": "The interest rate starts from ten percent per annum.",
-    "repayment": "Repayment happens automatically every month.",
-    "limit": "Your loan limit is pre-approved and visible in the app."
-}
+# ================================
+# FLAGS (in-memory)
+# ================================
+ESCALATION_FLAGS = []
 
-# --------------------------------------------------
-# EXOTEL DIAL (POSTMAN CALLS THIS)
-# --------------------------------------------------
-@app.post("/dial")
-def dial(payload: dict):
-    phone = payload["phone"]
+# ================================
+# INTENT HELPERS
+# ================================
+YES_WORDS = ["yes", "yeah", "ok", "okay", "interested", "continue", "next"]
+NO_WORDS = ["no", "not interested", "stop", "dont want"]
+REPEAT_WORDS = ["repeat", "again"]
+ESCALATE_WORDS = ["agent", "human", "help", "stuck", "support"]
 
-    r = requests.post(
-        f"https://api.exotel.com/v1/Accounts/{EXOTEL_ACCOUNT_SID}/Calls/connect.json",
-        auth=(EXOTEL_API_KEY, EXOTEL_API_TOKEN),
-        data={
-            "From": phone,
-            "CallerId": EXOTEL_TO_NUMBER,
-            "Url": "http://my.exotel.com/rupeekfintech13/exoml/start_voice/1105077"
-        }
-    )
+def contains(words, text):
+    return any(w in text for w in words)
 
-    r.raise_for_status()
-    call_sid = r.json()["Call"]["Sid"]
-    CALL_STATE[call_sid] = {"step": -1}
-
-    logger.info(f"📞 Dialed {phone} | CallSid={call_sid}")
-    return JSONResponse({"status": "calling", "callSid": call_sid})
-
-# --------------------------------------------------
-# UTILS
-# --------------------------------------------------
-def pcm_to_wav(pcm):
-    buf = io.BytesIO()
-    buf.write(b"RIFF")
-    buf.write(struct.pack("<I", 36 + len(pcm)))
-    buf.write(b"WAVEfmt ")
-    buf.write(struct.pack("<IHHIIHH", 16, 1, 1, SAMPLE_RATE,
-                           SAMPLE_RATE * 2, 2, 16))
-    buf.write(b"data")
-    buf.write(struct.pack("<I", len(pcm)))
-    buf.write(pcm)
-    return buf.getvalue()
-
-def sarvam_stt(pcm):
-    wav = pcm_to_wav(pcm)
-    r = requests.post(
-        "https://api.sarvam.ai/speech-to-text",
-        headers={"api-subscription-key": SARVAM_API_KEY},
-        files={"file": ("audio.wav", wav)},
-        data={"language_code": "en-IN"}
-    )
-    return r.json().get("transcript", "")
-
-def sarvam_tts(text):
-    r = requests.post(
-        "https://api.sarvam.ai/text-to-speech",
-        headers={"api-subscription-key": SARVAM_API_KEY},
-        json={
-            "text": text,
-            "target_language_code": "en-IN",
-            "speech_sample_rate": "16000"
-        }
-    )
-    return base64.b64decode(r.json()["audios"][0])
-
-async def send_pcm(ws, pcm):
-    for i in range(0, len(pcm), MIN_CHUNK_SIZE):
-        await ws.send_text(json.dumps({
-            "event": "media",
-            "media": {"payload": base64.b64encode(pcm[i:i+MIN_CHUNK_SIZE]).decode()}
-        }))
-
-# --------------------------------------------------
-# OPENAI INTENT
-# --------------------------------------------------
-def classify_intent(text):
-    prompt = f"""
-User said: "{text}"
-
-Classify intent strictly as one of:
-yes, no, next, repeat, done, help, faq
-Return only intent.
-"""
-    r = client.responses.create(
-        model="gpt-4.1-mini",
-        input=prompt
-    )
-    return r.output_text.strip().lower()
-
-# --------------------------------------------------
-# WEBSOCKET (VOICEBOT)
-# --------------------------------------------------
+# ================================
+# WEBSOCKET
+# ================================
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
     await ws.accept()
-    logger.info("🎧 Call connected")
+    logger.info("🎧 Voicebot connected")
 
-    buffer, speech, silence = b"", b"", 0
-    call_sid = None
+    state = STATE_GREETING
+    current_step = 0
+
+    buffer = b""
+    speech_buffer = b""
+    silence_count = 0
+    intro_sent = False
 
     try:
         while True:
-            msg = await ws.receive_text()
-            data = json.loads(msg)
+            msg = await ws.receive()
+            if "text" not in msg:
+                continue
+
+            data = json.loads(msg["text"])
             event = data.get("event")
 
-            if event == "start":
-                call_sid = data.get("callSid")
-                greeting = "Hello! Are you interested in a Rupeek personal loan?"
-                pcm = sarvam_tts(greeting)
+            # ---------------- START ----------------
+            if event == "start" and not intro_sent:
+                greeting = (
+                    "Hello, this is Rupeek personal loan assistant. "
+                    "You have a pre-approved loan. "
+                    "Would you like to know more about it?"
+                )
+                pcm = await asyncio.to_thread(sarvam_tts, greeting)
                 await send_pcm(ws, pcm)
+
+                logger.info("🗣 Greeting played")
+                state = STATE_CONFIRM_INTEREST
+                intro_sent = True
+                continue
 
             if event != "media":
                 continue
 
-            chunk = base64.b64decode(data["media"]["payload"])
+            # ---------------- AUDIO IN ----------------
+            payload = data["media"].get("payload")
+            if not payload:
+                continue
+
+            chunk = base64.b64decode(payload)
             buffer += chunk
 
             if len(buffer) < MIN_CHUNK_SIZE:
                 continue
 
-            frame, buffer = buffer[:MIN_CHUNK_SIZE], buffer[MIN_CHUNK_SIZE:]
+            frame = buffer[:MIN_CHUNK_SIZE]
+            buffer = buffer[MIN_CHUNK_SIZE:]
 
-            avg = sum(abs(int.from_bytes(frame[i:i+2], "little", signed=True))
-                      for i in range(0, len(frame), 2)) / (len(frame)//2)
-
-            if avg > SPEECH_THRESHOLD:
-                speech += frame
-                silence = 0
+            if is_speech(frame):
+                speech_buffer += frame
+                silence_count = 0
             else:
-                silence += 1
+                silence_count += 1
 
-            if silence >= SILENCE_CHUNKS and speech:
-                text = sarvam_stt(speech)
-                speech = b""
+            # ---------------- END OF UTTERANCE ----------------
+            if silence_count >= SILENCE_CHUNKS and speech_buffer:
+                user_text = await asyncio.to_thread(sarvam_stt, speech_buffer)
+                speech_buffer = b""
+                silence_count = 0
 
-                intent = classify_intent(text)
-                state = CALL_STATE.get(call_sid, {"step": -1})
+                if not user_text:
+                    logger.warning("⚠️ Empty STT result")
+                    continue
 
-                if intent == "no":
-                    reply = "Thank you for your time. Goodbye!"
-                    await send_pcm(ws, sarvam_tts(reply))
-                    await ws.close()
-                    return
+                user_text = user_text.lower()
+                logger.info(f"📝 User said: {user_text}")
 
-                if intent == "yes" or intent == "next":
-                    state["step"] += 1
-                    if state["step"] < len(STEPS):
-                        reply = STEPS[state["step"]]
-                    else:
-                        reply = "Process completed. Thank you!"
-                        await send_pcm(ws, sarvam_tts(reply))
-                        await ws.close()
-                        return
+                # ========== ESCALATION ==========
+                if contains(ESCALATE_WORDS, user_text):
+                    ESCALATION_FLAGS.append({
+                        "time": time.time(),
+                        "reason": user_text
+                    })
+                    reply = (
+                        "No problem. I will connect you to a human executive. "
+                        "Thank you for your time."
+                    )
+                    pcm = await asyncio.to_thread(sarvam_tts, reply)
+                    await send_pcm(ws, pcm)
+                    logger.warning("🚨 Escalation flagged")
+                    state = STATE_ESCALATE
+                    break
 
-                elif intent == "repeat":
-                    reply = STEPS[state["step"]]
+                # ========== CONFIRM INTEREST ==========
+                if state == STATE_CONFIRM_INTEREST:
+                    if contains(YES_WORDS, user_text):
+                        reply = PROCESS_STEPS[0]
+                        pcm = await asyncio.to_thread(sarvam_tts, reply)
+                        await send_pcm(ws, pcm)
+                        current_step = 0
+                        state = STATE_STEP_FLOW
+                        continue
 
-                elif intent == "help":
-                    logger.warning(f"🚨 Human help needed: {call_sid}")
-                    reply = "I will connect you to our team shortly."
-                    await send_pcm(ws, sarvam_tts(reply))
-                    await ws.close()
-                    return
+                    if contains(NO_WORDS, user_text):
+                        reply = "Thank you for your time. Have a great day."
+                        pcm = await asyncio.to_thread(sarvam_tts, reply)
+                        await send_pcm(ws, pcm)
+                        logger.info("📴 User not interested")
+                        break
 
-                else:
-                    reply = "Please say yes, next, repeat, or no."
+                    # repeat question
+                    repeat = "Sorry, I didn't catch that. Would you like to know more?"
+                    pcm = await asyncio.to_thread(sarvam_tts, repeat)
+                    await send_pcm(ws, pcm)
+                    continue
 
-                CALL_STATE[call_sid] = state
-                await send_pcm(ws, sarvam_tts(reply))
+                # ========== STEP FLOW ==========
+                if state == STATE_STEP_FLOW:
+                    if contains(REPEAT_WORDS, user_text):
+                        reply = PROCESS_STEPS[current_step]
+                        pcm = await asyncio.to_thread(sarvam_tts, reply)
+                        await send_pcm(ws, pcm)
+                        continue
+
+                    if contains(YES_WORDS, user_text):
+                        current_step += 1
+                        if current_step >= len(PROCESS_STEPS):
+                            reply = (
+                                "You are all set. "
+                                "Our team will reach out shortly. Thank you."
+                            )
+                            pcm = await asyncio.to_thread(sarvam_tts, reply)
+                            await send_pcm(ws, pcm)
+                            state = STATE_DONE
+                            break
+
+                        reply = PROCESS_STEPS[current_step]
+                        pcm = await asyncio.to_thread(sarvam_tts, reply)
+                        await send_pcm(ws, pcm)
+                        continue
+
+                    # fallback
+                    fallback = "Say next to continue or repeat to hear again."
+                    pcm = await asyncio.to_thread(sarvam_tts, fallback)
+                    await send_pcm(ws, pcm)
 
     except WebSocketDisconnect:
         logger.info("🔌 Call disconnected")
 
-# --------------------------------------------------
-# START
-# --------------------------------------------------
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    except Exception as e:
+        logger.exception(f"❌ Voicebot crashed: {e}")
