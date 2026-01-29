@@ -537,9 +537,14 @@ SAMPLE_RATE = 16000
 MIN_CHUNK_SIZE = 3200
 SPEECH_THRESHOLD = 500
 SILENCE_CHUNKS = 6
+
 MAX_SILENCE_RETRIES = 2
 MAX_CONFUSION_RETRIES = 2
-PAUSE_SECONDS = 0.7  # 👈 natural pause
+
+PAUSE_SECONDS = 0.7
+INTENT_GRACE_SECONDS = 1.2
+BOT_COOLDOWN = 1.5
+FINAL_PLAY_WAIT = 3.0
 
 # ==================================================
 # LOGGING
@@ -563,23 +568,38 @@ app = FastAPI()
 SESSIONS = {}
 
 # ==================================================
-# STEP FLOW
+# PITCH & STEPS (UPDATED)
 # ==================================================
 STEPS = [
-    "You have a pre approved Rupeek personal loan with zero interest if repaid within the same month. Are you interested?",
+    (
+        "Hi, my name is Mahesh, calling from Rupeek. "
+        "You have a pre-approved personal loan at zero interest, "
+        "if you repay within the same month. "
+        "It works like a credit line with instant disbursal. "
+        "Are you interested?"
+    ),
     "Step one. Download the Rupeek app from the Play Store. Say next when done.",
     "Step two. Complete your KYC using Aadhaar. Say next once completed.",
     "Step three. Select your loan amount and confirm disbursal. Say done to finish."
 ]
 
 # ==================================================
-# FAQS
+# FAQS (UPDATED)
 # ==================================================
 FAQS = {
-    "interest": "The interest rate is zero if you repay the amount within the same month.",
-    "emi": "There is no EMI if you repay within the month. Otherwise EMI depends on tenure.",
-    "repay": "You can repay anytime through the Rupeek app.",
-    "limit": "Your loan limit is already pre approved and visible in the app."
+    "eligible": "The loan amount is personalized for each customer and visible in the Rupeek app.",
+    "amount": "Your eligible loan amount is shown inside the Rupeek app under Click Cash.",
+    "interest": "There is zero interest if you repay before month end.",
+    "emi": "If repayment is missed, the loan converts to EMI as shown in the app.",
+    "repay": "You must repay by month end to avoid interest.",
+    "processing": (
+        "The processing fee is a one-time standard charge. "
+        "You receive the full approved amount in your bank account."
+    ),
+    "limit": (
+        "Your current eligible amount may be lower. "
+        "With timely repayment, your limit increases automatically."
+    )
 }
 
 # ==================================================
@@ -594,7 +614,7 @@ def classify(text: str):
 
     if any(x in t for x in ["no", "not interested", "stop"]):
         return ("NO", None)
-    if any(x in t for x in ["yes", "yeah", "ok", "interested"]):
+    if any(x in t for x in ["yes", "yeah", "interested", "okay"]):
         return ("YES", None)
     if any(x in t for x in ["next", "continue"]):
         return ("NEXT", None)
@@ -684,7 +704,8 @@ async def ws_handler(ws: WebSocket):
         "step": 0,
         "silence": 0,
         "confusion": 0,
-        "started": False
+        "started": False,
+        "last_bot_time": 0
     }
 
     buffer = b""
@@ -733,32 +754,20 @@ async def ws_handler(ws: WebSocket):
                 speech_buffer = b""
                 silence_count = 0
 
-                if not text:
-                    SESSIONS[session_id]["silence"] += 1
-                    if SESSIONS[session_id]["silence"] <= MAX_SILENCE_RETRIES:
-                        await asyncio.sleep(PAUSE_SECONDS)
-                        pcm = await asyncio.to_thread(
-                            sarvam_tts,
-                            "Sorry, I didn’t hear that. Please respond."
-                        )
-                        await send_pcm(ws, pcm)
-                        continue
+                await asyncio.sleep(INTENT_GRACE_SECONDS)
 
-                    logger.error(f"🚨 Escalation | silence | {session_id}")
-                    pcm = await asyncio.to_thread(
-                        sarvam_tts,
-                        "Sorry, I am unable to understand. Our representative will connect with you shortly."
-                    )
-                    await send_pcm(ws, pcm)
-                    break
+                if len(text.split()) < 2:
+                    logger.info("⚠️ Ignoring short/unclear input")
+                    continue
 
                 intent, meta = classify(text)
                 logger.info(f"🗣 {text} → {intent}")
 
-                # ---------- FAQ ----------
+                await asyncio.sleep(BOT_COOLDOWN)
+
+                # FAQ
                 if intent == "FAQ":
-                    answer = FAQS[meta]
-                    pcm = await asyncio.to_thread(sarvam_tts, answer)
+                    pcm = await asyncio.to_thread(sarvam_tts, FAQS[meta])
                     await send_pcm(ws, pcm)
                     await asyncio.sleep(PAUSE_SECONDS)
                     pcm = await asyncio.to_thread(
@@ -768,13 +777,13 @@ async def ws_handler(ws: WebSocket):
                     await send_pcm(ws, pcm)
                     continue
 
-                # ---------- FLOW ----------
                 if intent == "NO":
                     pcm = await asyncio.to_thread(
                         sarvam_tts,
                         "Thank you for your time. Have a great day."
                     )
                     await send_pcm(ws, pcm)
+                    await asyncio.sleep(FINAL_PLAY_WAIT)
                     break
 
                 if intent in ("YES", "NEXT"):
@@ -785,7 +794,9 @@ async def ws_handler(ws: WebSocket):
                             "Your process is complete. Thank you."
                         )
                         await send_pcm(ws, pcm)
+                        await asyncio.sleep(FINAL_PLAY_WAIT)
                         break
+
                     pcm = await asyncio.to_thread(
                         sarvam_tts,
                         STEPS[SESSIONS[session_id]["step"]]
@@ -807,20 +818,20 @@ async def ws_handler(ws: WebSocket):
                         "Thank you. Your request is complete."
                     )
                     await send_pcm(ws, pcm)
+                    await asyncio.sleep(FINAL_PLAY_WAIT)
                     break
 
-                # ---------- UNKNOWN ----------
+                # UNKNOWN
                 SESSIONS[session_id]["confusion"] += 1
                 if SESSIONS[session_id]["confusion"] > MAX_CONFUSION_RETRIES:
-                    logger.error(f"🚨 Escalation | confusion | {session_id}")
                     pcm = await asyncio.to_thread(
                         sarvam_tts,
-                        "I will connect you to a representative for further assistance."
+                        "Sorry, I am unable to understand. Our representative will connect with you shortly."
                     )
                     await send_pcm(ws, pcm)
+                    await asyncio.sleep(FINAL_PLAY_WAIT)
                     break
 
-                await asyncio.sleep(PAUSE_SECONDS)
                 pcm = await asyncio.to_thread(
                     sarvam_tts,
                     "Please say yes, next, repeat, or no."
