@@ -518,16 +518,15 @@ import base64
 import requests
 import io
 import struct
+import time
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
-import time
 
 # ==================================================
 # ENV
 # ==================================================
 load_dotenv()
-
 PORT = int(os.getenv("PORT", 10000))
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
@@ -537,9 +536,10 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 SAMPLE_RATE = 16000
 MIN_CHUNK_SIZE = 3200
 SPEECH_THRESHOLD = 500
-SILENCE_CHUNKS = 6  # ~600ms
+SILENCE_CHUNKS = 6
 MAX_SILENCE_RETRIES = 2
 MAX_CONFUSION_RETRIES = 2
+PAUSE_SECONDS = 0.7  # 👈 natural pause
 
 # ==================================================
 # LOGGING
@@ -550,11 +550,10 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
     force=True
 )
-
 logger = logging.getLogger("voicebot")
 
 # ==================================================
-# FASTAPI
+# APP
 # ==================================================
 app = FastAPI()
 
@@ -574,23 +573,37 @@ STEPS = [
 ]
 
 # ==================================================
-# FAQ / INTENT HANDLING
+# FAQS
 # ==================================================
-def classify_intent(text: str) -> str:
+FAQS = {
+    "interest": "The interest rate is zero if you repay the amount within the same month.",
+    "emi": "There is no EMI if you repay within the month. Otherwise EMI depends on tenure.",
+    "repay": "You can repay anytime through the Rupeek app.",
+    "limit": "Your loan limit is already pre approved and visible in the app."
+}
+
+# ==================================================
+# INTENT CLASSIFIER
+# ==================================================
+def classify(text: str):
     t = text.lower()
 
-    if any(x in t for x in ["no", "not interested", "stop"]):
-        return "NO"
-    if any(x in t for x in ["yes", "yeah", "interested", "ok"]):
-        return "YES"
-    if any(x in t for x in ["next", "continue"]):
-        return "NEXT"
-    if any(x in t for x in ["repeat", "again"]):
-        return "REPEAT"
-    if any(x in t for x in ["done", "completed"]):
-        return "DONE"
+    for key in FAQS:
+        if key in t:
+            return ("FAQ", key)
 
-    return "UNKNOWN"
+    if any(x in t for x in ["no", "not interested", "stop"]):
+        return ("NO", None)
+    if any(x in t for x in ["yes", "yeah", "ok", "interested"]):
+        return ("YES", None)
+    if any(x in t for x in ["next", "continue"]):
+        return ("NEXT", None)
+    if any(x in t for x in ["repeat", "again"]):
+        return ("REPEAT", None)
+    if any(x in t for x in ["done", "completed"]):
+        return ("DONE", None)
+
+    return ("UNKNOWN", None)
 
 # ==================================================
 # AUDIO UTILS
@@ -650,15 +663,11 @@ def sarvam_tts(text: str) -> bytes:
     return base64.b64decode(r.json()["audios"][0])
 
 
-async def send_pcm(ws: WebSocket, pcm: bytes):
+async def send_pcm(ws, pcm):
     for i in range(0, len(pcm), MIN_CHUNK_SIZE):
         await ws.send_text(json.dumps({
             "event": "media",
-            "media": {
-                "payload": base64.b64encode(
-                    pcm[i:i + MIN_CHUNK_SIZE]
-                ).decode()
-            }
+            "media": {"payload": base64.b64encode(pcm[i:i+MIN_CHUNK_SIZE]).decode()}
         }))
         await asyncio.sleep(0)
 
@@ -669,7 +678,7 @@ async def send_pcm(ws: WebSocket, pcm: bytes):
 async def ws_handler(ws: WebSocket):
     await ws.accept()
     session_id = str(time.time())
-    logger.info(f"🎧 Call connected | session={session_id}")
+    logger.info(f"🎧 Call connected | {session_id}")
 
     SESSIONS[session_id] = {
         "step": 0,
@@ -691,15 +700,12 @@ async def ws_handler(ws: WebSocket):
             data = json.loads(msg["text"])
             event = data.get("event")
 
-            # ---------- START ----------
             if event == "start" and not SESSIONS[session_id]["started"]:
-                greeting = STEPS[0]
-                pcm = await asyncio.to_thread(sarvam_tts, greeting)
+                pcm = await asyncio.to_thread(sarvam_tts, STEPS[0])
                 await send_pcm(ws, pcm)
                 SESSIONS[session_id]["started"] = True
                 continue
 
-            # ---------- MEDIA ----------
             if event != "media":
                 continue
 
@@ -722,7 +728,6 @@ async def ws_handler(ws: WebSocket):
             else:
                 silence_count += 1
 
-            # ---------- END OF UTTERANCE ----------
             if silence_count >= SILENCE_CHUNKS and speech_buffer:
                 text = await asyncio.to_thread(sarvam_stt, speech_buffer)
                 speech_buffer = b""
@@ -730,18 +735,16 @@ async def ws_handler(ws: WebSocket):
 
                 if not text:
                     SESSIONS[session_id]["silence"] += 1
-                    logger.warning(f"🔇 Silence retry {SESSIONS[session_id]['silence']}")
-
                     if SESSIONS[session_id]["silence"] <= MAX_SILENCE_RETRIES:
+                        await asyncio.sleep(PAUSE_SECONDS)
                         pcm = await asyncio.to_thread(
                             sarvam_tts,
-                            "Sorry, I didn’t catch that. Please say yes, next, repeat, or no."
+                            "Sorry, I didn’t hear that. Please respond."
                         )
                         await send_pcm(ws, pcm)
                         continue
 
-                    # ESCALATE
-                    logger.error(f"🚨 Human intervention required | session={session_id}")
+                    logger.error(f"🚨 Escalation | silence | {session_id}")
                     pcm = await asyncio.to_thread(
                         sarvam_tts,
                         "Sorry, I am unable to understand. Our representative will connect with you shortly."
@@ -749,14 +752,23 @@ async def ws_handler(ws: WebSocket):
                     await send_pcm(ws, pcm)
                     break
 
-                # RESET COUNTERS
-                SESSIONS[session_id]["silence"] = 0
-                intent = classify_intent(text)
-                logger.info(f"🗣 User said: {text} | intent={intent}")
+                intent, meta = classify(text)
+                logger.info(f"🗣 {text} → {intent}")
 
-                step = SESSIONS[session_id]["step"]
+                # ---------- FAQ ----------
+                if intent == "FAQ":
+                    answer = FAQS[meta]
+                    pcm = await asyncio.to_thread(sarvam_tts, answer)
+                    await send_pcm(ws, pcm)
+                    await asyncio.sleep(PAUSE_SECONDS)
+                    pcm = await asyncio.to_thread(
+                        sarvam_tts,
+                        STEPS[SESSIONS[session_id]["step"]]
+                    )
+                    await send_pcm(ws, pcm)
+                    continue
 
-                # ---------- INTENT HANDLING ----------
+                # ---------- FLOW ----------
                 if intent == "NO":
                     pcm = await asyncio.to_thread(
                         sarvam_tts,
@@ -765,7 +777,7 @@ async def ws_handler(ws: WebSocket):
                     await send_pcm(ws, pcm)
                     break
 
-                elif intent in ("YES", "NEXT"):
+                if intent in ("YES", "NEXT"):
                     SESSIONS[session_id]["step"] += 1
                     if SESSIONS[session_id]["step"] >= len(STEPS):
                         pcm = await asyncio.to_thread(
@@ -779,15 +791,17 @@ async def ws_handler(ws: WebSocket):
                         STEPS[SESSIONS[session_id]["step"]]
                     )
                     await send_pcm(ws, pcm)
+                    continue
 
-                elif intent == "REPEAT":
+                if intent == "REPEAT":
                     pcm = await asyncio.to_thread(
                         sarvam_tts,
-                        STEPS[step]
+                        STEPS[SESSIONS[session_id]["step"]]
                     )
                     await send_pcm(ws, pcm)
+                    continue
 
-                elif intent == "DONE":
+                if intent == "DONE":
                     pcm = await asyncio.to_thread(
                         sarvam_tts,
                         "Thank you. Your request is complete."
@@ -795,26 +809,26 @@ async def ws_handler(ws: WebSocket):
                     await send_pcm(ws, pcm)
                     break
 
-                else:
-                    SESSIONS[session_id]["confusion"] += 1
-                    logger.warning(f"🤔 Confusion count {SESSIONS[session_id]['confusion']}")
-
-                    if SESSIONS[session_id]["confusion"] > MAX_CONFUSION_RETRIES:
-                        pcm = await asyncio.to_thread(
-                            sarvam_tts,
-                            "I will connect you to a representative for further assistance."
-                        )
-                        await send_pcm(ws, pcm)
-                        break
-
+                # ---------- UNKNOWN ----------
+                SESSIONS[session_id]["confusion"] += 1
+                if SESSIONS[session_id]["confusion"] > MAX_CONFUSION_RETRIES:
+                    logger.error(f"🚨 Escalation | confusion | {session_id}")
                     pcm = await asyncio.to_thread(
                         sarvam_tts,
-                        "Please say yes, next, repeat, or no."
+                        "I will connect you to a representative for further assistance."
                     )
                     await send_pcm(ws, pcm)
+                    break
+
+                await asyncio.sleep(PAUSE_SECONDS)
+                pcm = await asyncio.to_thread(
+                    sarvam_tts,
+                    "Please say yes, next, repeat, or no."
+                )
+                await send_pcm(ws, pcm)
 
     except WebSocketDisconnect:
-        logger.info(f"🔌 Call disconnected | session={session_id}")
+        logger.info(f"🔌 Call disconnected | {session_id}")
 
 # ==================================================
 # START
