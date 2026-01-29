@@ -509,16 +509,7 @@
 # # ==================================================
 # if __name__ == "__main__":
 #     uvicorn.run(app, host="0.0.0.0", port=PORT)
-import os
-import json
-import asyncio
-import logging
-import sys
-import base64
-import requests
-import io
-import struct
-import time
+import os, json, asyncio, logging, sys, base64, requests, io, struct, time
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
@@ -536,13 +527,12 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 SAMPLE_RATE = 16000
 MIN_CHUNK_SIZE = 3200
 SPEECH_THRESHOLD = 500
-SILENCE_CHUNKS = 6
+SILENCE_CHUNKS = 7
+PAUSE = 1.5
+FINAL_WAIT = 2.5
 
-MAX_SILENCE_RETRIES = 2
-MAX_CONFUSION_RETRIES = 2
-
-PAUSE_SECONDS = 1.2        # pause before speaking again
-FINAL_PLAY_WAIT = 2.0     # wait before hanging up
+MAX_CLARIFY = 2
+MAX_SILENCE = 2
 
 # ==================================================
 # LOGGING
@@ -553,46 +543,91 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
     force=True
 )
-logger = logging.getLogger("voicebot")
+log = logging.getLogger("voicebot")
 
 # ==================================================
 # APP
 # ==================================================
 app = FastAPI()
-
-# ==================================================
-# SESSION STORE
-# ==================================================
 SESSIONS = {}
 
 # ==================================================
-# PITCH + STEPS
+# PITCH (UNCHANGED, FULL)
 # ==================================================
 PITCH = (
-    "Hi, my name is Mahesh, calling from Rupeek. "
-    "You have a pre approved personal loan at zero interest if repaid within the same month. "
-    "It works like a credit line. You can withdraw money whenever you need and repay only what you use. "
-    "The process is fully digital with instant disbursal. "
+    "Hi, my name is Neeraja, calling from Rupeek. "
+    "You have a pre approved personal loan at zero interest, "
+    "which means you do not have to pay any interest if you repay the amount within the same month. "
+    "It works like a credit line. "
+    "You can withdraw money whenever you need, and you repay only what you use. "
+    "You can even withdraw again every month with zero interest, as long as it is repaid within the month. "
+    "The process is one hundred percent digital, with no income proof and no paperwork required. "
+    "You can receive instant disbursal to your bank account in just sixty seconds. "
+    "With timely repayments, you can boost your CIBIL score and unlock higher limits in the future without any interest. "
+    "This is a limited time offer. "
     "Are you interested?"
 )
 
+# ==================================================
+# STEPS
+# ==================================================
 STEPS = [
-    "Step one. Download the Rupeek app from the Play Store. Say next when done.",
+    "Step one. Download the Rupeek app from the Play Store. Say next once done.",
     "Step two. Complete your KYC using Aadhaar. Say next once completed.",
     "Step three. Select your loan amount and confirm disbursal. Say done to finish."
 ]
 
 # ==================================================
-# FAQS
+# FAQS (FULL ANSWERS)
 # ==================================================
-FAQS = {
-    "loan amount": "The loan amount is personalized for each customer and visible in the Rupeek app.",
-    "interest": "There is zero interest if you repay before month end.",
-    "emi": "EMI applies only if repayment is missed. The app shows exact EMI.",
-    "processing": "Processing fee is a one time charge for instant disbursal.",
-    "repayment": "You can repay anytime before month end using the Rupeek app.",
-    "limit": "Your current approved limit is shown in the app and increases with timely repayment."
-}
+FAQS = [
+    (
+        ["loan amount", "eligible", "limit", "approved amount"],
+        "The loan amount is personalized for each customer. "
+        "You can check your approved limit in the Rupeek app under Click Cash."
+    ),
+    (
+        ["roi", "interest if miss", "miss payment", "repayment due date"],
+        "If the loan repayment is missed, the loan converts to EMI with interest as shown in the app."
+    ),
+    (
+        ["zero interest", "0 percent", "really zero"],
+        "Yes, there will be no interest if you repay before the month end."
+    ),
+    (
+        ["emi amount", "monthly emi"],
+        "The EMI depends on the tenure you select. "
+        "The app clearly shows the exact EMI amount."
+    ),
+    (
+        ["processing fee", "pf", "gst", "credit card"],
+        "Zero interest applies to the amount you use if you repay within the same month. "
+        "The processing fee is a one time standard charge for instant digital disbursal. "
+        "In credit cards, similar costs are recovered through annual fees and high cash withdrawal charges. "
+        "Here you pay a transparent one time fee with no recurring interest."
+    ),
+    (
+        ["app shows interest", "1.45 percent", "32 percent"],
+        "The app shows the standard ROI for EMI. "
+        "If you repay by month end, you do not have to pay any interest. "
+        "If you do not repay, you can convert it into easy EMI."
+    ),
+    (
+        ["repay date", "month end only"],
+        "You are required to repay the amount by month end to avail zero interest."
+    ),
+    (
+        ["pf high", "processing fee high", "other companies"],
+        "Our processing fee is very nominal. "
+        "Many companies charge five to six percent and deduct it from the disbursal amount. "
+        "With Rupeek, you receive the full approved amount in your bank account with no deductions."
+    ),
+    (
+        ["two lakh", "30,000", "reduced amount"],
+        "Currently, based on system checks, your eligible amount is thirty thousand rupees. "
+        "With timely repayments, your eligibility increases automatically and you can access higher limits in future."
+    )
+]
 
 # ==================================================
 # INTENT CLASSIFIER
@@ -600,46 +635,42 @@ FAQS = {
 def classify(text: str):
     t = text.lower()
 
-    for k in FAQS:
-        if k in t:
-            return ("FAQ", k)
+    for keys, _ in FAQS:
+        if any(k in t for k in keys):
+            return "FAQ", keys
+
+    if any(x in t for x in ["yes", "interested", "okay", "ok"]):
+        return "YES", None
 
     if any(x in t for x in ["no", "not interested", "stop"]):
-        return ("NO", None)
-
-    if any(x in t for x in ["yes", "yeah", "ok", "interested"]):
-        return ("YES", None)
+        return "NO", None
 
     if any(x in t for x in ["next", "continue"]):
-        return ("NEXT", None)
+        return "NEXT", None
 
     if any(x in t for x in ["repeat", "again"]):
-        return ("REPEAT", None)
+        return "REPEAT", None
 
-    if any(x in t for x in ["done", "completed"]):
-        return ("DONE", None)
+    if any(x in t for x in ["done", "complete"]):
+        return "DONE", None
 
-    return ("UNKNOWN", None)
+    return "UNKNOWN", None
 
 # ==================================================
 # AUDIO UTILS
 # ==================================================
-def is_speech(pcm: bytes) -> bool:
-    total, count = 0, 0
-    for i in range(0, len(pcm) - 1, 2):
-        s = int.from_bytes(pcm[i:i+2], "little", signed=True)
-        total += abs(s)
-        count += 1
-    return count > 0 and (total / count) > SPEECH_THRESHOLD
+def is_speech(pcm):
+    total = sum(abs(int.from_bytes(pcm[i:i+2], "little", signed=True))
+                for i in range(0, len(pcm)-1, 2))
+    return (total / max(len(pcm)//2, 1)) > SPEECH_THRESHOLD
 
-
-def pcm_to_wav(pcm: bytes) -> bytes:
+def pcm_to_wav(pcm):
     buf = io.BytesIO()
     buf.write(b"RIFF")
     buf.write(struct.pack("<I", 36 + len(pcm)))
     buf.write(b"WAVEfmt ")
     buf.write(struct.pack("<IHHIIHH", 16, 1, 1, SAMPLE_RATE,
-                           SAMPLE_RATE * 2, 2, 16))
+                           SAMPLE_RATE*2, 2, 16))
     buf.write(b"data")
     buf.write(struct.pack("<I", len(pcm)))
     buf.write(pcm)
@@ -648,20 +679,18 @@ def pcm_to_wav(pcm: bytes) -> bytes:
 # ==================================================
 # SARVAM
 # ==================================================
-def sarvam_stt(pcm: bytes) -> str:
-    wav = pcm_to_wav(pcm)
+def stt(pcm):
     r = requests.post(
         "https://api.sarvam.ai/speech-to-text",
         headers={"api-subscription-key": SARVAM_API_KEY},
-        files={"file": ("audio.wav", wav, "audio/wav")},
+        files={"file": ("audio.wav", pcm_to_wav(pcm), "audio/wav")},
         data={"language_code": "en-IN"},
         timeout=20
     )
     r.raise_for_status()
     return r.json().get("transcript", "").strip()
 
-
-def sarvam_tts(text: str) -> bytes:
+def tts(text):
     r = requests.post(
         "https://api.sarvam.ai/text-to-speech",
         headers={
@@ -678,8 +707,8 @@ def sarvam_tts(text: str) -> bytes:
     r.raise_for_status()
     return base64.b64decode(r.json()["audios"][0])
 
-
-async def send_pcm(ws, pcm):
+async def speak(ws, text):
+    pcm = await asyncio.to_thread(tts, text)
     for i in range(0, len(pcm), MIN_CHUNK_SIZE):
         await ws.send_text(json.dumps({
             "event": "media",
@@ -691,23 +720,16 @@ async def send_pcm(ws, pcm):
 # WEBSOCKET
 # ==================================================
 @app.websocket("/ws")
-async def ws_handler(ws: WebSocket):
+async def ws(ws: WebSocket):
     await ws.accept()
-    session_id = str(time.time())
+    sid = str(time.time())
 
-    logger.info(f"🎧 Call connected | {session_id}")
+    log.info(f"🎧 Call connected | {sid}")
 
-    SESSIONS[session_id] = {
-        "phase": "PITCH",      # PITCH → STEPS
-        "step": 0,
-        "silence": 0,
-        "confusion": 0,
-        "started": False
-    }
+    SESSIONS[sid] = {"phase": "PITCH", "step": 0, "clarify": 0, "started": False}
 
-    buffer = b""
-    speech_buffer = b""
-    silence_count = 0
+    buf, speech = b"", b""
+    silence = 0
 
     try:
         while True:
@@ -716,173 +738,93 @@ async def ws_handler(ws: WebSocket):
                 continue
 
             data = json.loads(msg["text"])
-            event = data.get("event")
 
-            # ---------------- START ----------------
-            if event == "start" and not SESSIONS[session_id]["started"]:
-                logger.info("▶️ Playing pitch")
-                pcm = await asyncio.to_thread(sarvam_tts, PITCH)
-                await send_pcm(ws, pcm)
-                SESSIONS[session_id]["started"] = True
+            if data.get("event") == "start" and not SESSIONS[sid]["started"]:
+                log.info("▶️ Playing pitch")
+                await speak(ws, PITCH)
+                SESSIONS[sid]["started"] = True
                 continue
 
-            if event != "media":
+            if data.get("event") != "media":
                 continue
 
-            payload = data["media"].get("payload")
-            if not payload:
+            chunk = base64.b64decode(data["media"]["payload"])
+            buf += chunk
+
+            if len(buf) < MIN_CHUNK_SIZE:
                 continue
 
-            chunk = base64.b64decode(payload)
-            buffer += chunk
-
-            if len(buffer) < MIN_CHUNK_SIZE:
-                continue
-
-            frame = buffer[:MIN_CHUNK_SIZE]
-            buffer = buffer[MIN_CHUNK_SIZE:]
+            frame, buf = buf[:MIN_CHUNK_SIZE], buf[MIN_CHUNK_SIZE:]
 
             if is_speech(frame):
-                speech_buffer += frame
-                silence_count = 0
+                speech += frame
+                silence = 0
             else:
-                silence_count += 1
+                silence += 1
 
-            if silence_count < SILENCE_CHUNKS:
+            if silence < SILENCE_CHUNKS or not speech:
                 continue
 
-            if not speech_buffer:
-                continue
+            text = await asyncio.to_thread(stt, speech)
+            speech = b""
+            silence = 0
 
-            # ---------------- STT ----------------
-            text = await asyncio.to_thread(sarvam_stt, speech_buffer)
-            speech_buffer = b""
-            silence_count = 0
-
-            if not text:
-                SESSIONS[session_id]["silence"] += 1
-                if SESSIONS[session_id]["silence"] <= MAX_SILENCE_RETRIES:
-                    await asyncio.sleep(PAUSE_SECONDS)
-                    pcm = await asyncio.to_thread(
-                        sarvam_tts,
-                        "Sorry, I did not catch that. Please respond."
-                    )
-                    await send_pcm(ws, pcm)
-                    continue
-
-                logger.error("🚨 Escalation due to silence")
-                pcm = await asyncio.to_thread(
-                    sarvam_tts,
-                    "Sorry, I am unable to understand. Our representative will connect with you shortly."
-                )
-                await send_pcm(ws, pcm)
-                await asyncio.sleep(FINAL_PLAY_WAIT)
-                break
-
-            logger.info(f"🗣 User said: {text}")
+            log.info(f"🗣 User said: {text}")
             intent, meta = classify(text)
 
-            # ---------------- FAQ ----------------
+            # FAQ
             if intent == "FAQ":
-                pcm = await asyncio.to_thread(sarvam_tts, FAQS[meta])
-                await send_pcm(ws, pcm)
-                await asyncio.sleep(PAUSE_SECONDS)
-
-                if SESSIONS[session_id]["phase"] == "PITCH":
-                    pcm = await asyncio.to_thread(sarvam_tts, PITCH)
-                else:
-                    pcm = await asyncio.to_thread(
-                        sarvam_tts,
-                        STEPS[SESSIONS[session_id]["step"]]
-                    )
-
-                await send_pcm(ws, pcm)
+                for keys, ans in FAQS:
+                    if keys == meta:
+                        await speak(ws, ans)
+                        await asyncio.sleep(PAUSE)
+                        break
                 continue
 
-            # ================= PITCH PHASE =================
-            if SESSIONS[session_id]["phase"] == "PITCH":
-
-                if intent == "NO":
-                    pcm = await asyncio.to_thread(
-                        sarvam_tts,
-                        "Thank you for your time. Have a great day."
-                    )
-                    await send_pcm(ws, pcm)
-                    await asyncio.sleep(FINAL_PLAY_WAIT)
-                    break
-
+            # PITCH PHASE
+            if SESSIONS[sid]["phase"] == "PITCH":
                 if intent == "YES":
-                    logger.info("✅ User interested → moving to steps")
-                    SESSIONS[session_id]["phase"] = "STEPS"
-                    SESSIONS[session_id]["step"] = 0
-                    pcm = await asyncio.to_thread(sarvam_tts, STEPS[0])
-                    await send_pcm(ws, pcm)
+                    SESSIONS[sid]["phase"] = "STEPS"
+                    await speak(ws, STEPS[0])
                     continue
 
-                pcm = await asyncio.to_thread(
-                    sarvam_tts,
-                    "Please say yes if you are interested, or no to decline."
-                )
-                await send_pcm(ws, pcm)
-                continue
-
-            # ================= STEPS PHASE =================
-            if intent == "NEXT":
-                SESSIONS[session_id]["step"] += 1
-                if SESSIONS[session_id]["step"] >= len(STEPS):
-                    pcm = await asyncio.to_thread(
-                        sarvam_tts,
-                        "Your process is complete. Thank you."
-                    )
-                    await send_pcm(ws, pcm)
-                    await asyncio.sleep(FINAL_PLAY_WAIT)
+                if intent == "NO":
+                    await speak(ws, "Thank you for your time. Have a great day.")
+                    await asyncio.sleep(FINAL_WAIT)
                     break
 
-                pcm = await asyncio.to_thread(
-                    sarvam_tts,
-                    STEPS[SESSIONS[session_id]["step"]]
-                )
-                await send_pcm(ws, pcm)
+                SESSIONS[sid]["clarify"] += 1
+                if SESSIONS[sid]["clarify"] > MAX_CLARIFY:
+                    await speak(ws, "I will connect you to our representative for further assistance.")
+                    await asyncio.sleep(FINAL_WAIT)
+                    break
+
+                await speak(ws, "Please say yes if interested or no to decline.")
+                continue
+
+            # STEPS
+            if intent == "NEXT":
+                SESSIONS[sid]["step"] += 1
+                if SESSIONS[sid]["step"] >= len(STEPS):
+                    await speak(ws, "Your process is complete. Thank you.")
+                    await asyncio.sleep(FINAL_WAIT)
+                    break
+                await speak(ws, STEPS[SESSIONS[sid]["step"]])
                 continue
 
             if intent == "REPEAT":
-                pcm = await asyncio.to_thread(
-                    sarvam_tts,
-                    STEPS[SESSIONS[session_id]["step"]]
-                )
-                await send_pcm(ws, pcm)
+                await speak(ws, STEPS[SESSIONS[sid]["step"]])
                 continue
 
             if intent == "DONE":
-                pcm = await asyncio.to_thread(
-                    sarvam_tts,
-                    "Thank you. Your request is complete."
-                )
-                await send_pcm(ws, pcm)
-                await asyncio.sleep(FINAL_PLAY_WAIT)
+                await speak(ws, "Thank you. Your request is complete.")
+                await asyncio.sleep(FINAL_WAIT)
                 break
 
-            # ---------------- UNKNOWN ----------------
-            SESSIONS[session_id]["confusion"] += 1
-            if SESSIONS[session_id]["confusion"] > MAX_CONFUSION_RETRIES:
-                logger.error("🚨 Escalation due to confusion")
-                pcm = await asyncio.to_thread(
-                    sarvam_tts,
-                    "I will connect you to a representative for further assistance."
-                )
-                await send_pcm(ws, pcm)
-                await asyncio.sleep(FINAL_PLAY_WAIT)
-                break
-
-            await asyncio.sleep(PAUSE_SECONDS)
-            pcm = await asyncio.to_thread(
-                sarvam_tts,
-                "Please say next, repeat, or done."
-            )
-            await send_pcm(ws, pcm)
+            await speak(ws, "Please say next, repeat, or done.")
 
     except WebSocketDisconnect:
-        logger.info(f"🔌 Call disconnected | {session_id}")
+        log.info(f"🔌 Call disconnected | {sid}")
 
 # ==================================================
 # START
