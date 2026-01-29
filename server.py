@@ -532,7 +532,7 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 # ==================================================
 # AUDIO CONFIG
 # ==================================================
-SAMPLE_RATE = 22050
+SAMPLE_RATE = 16000
 MIN_CHUNK_SIZE = 3200
 SPEECH_THRESHOLD = 500
 SILENCE_CHUNKS = 6
@@ -693,7 +693,7 @@ def tts_stream(text: str):
             "target_language_code": LANGUAGE,
             "speaker": VOICE,
             "model": "bulbul:v3-beta",
-            "speech_sample_rate": 22050,
+            "speech_sample_rate": 16000,
             "pace": 1.05,
             "temperature": 0.6,
             "output_audio_codec": "mp3",
