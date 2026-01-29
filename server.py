@@ -723,10 +723,11 @@ import base64
 import requests
 import io
 import struct
-import re
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 import uvicorn
+from openai import OpenAI
 
 # --------------------------------------------------
 # ENV
@@ -736,6 +737,18 @@ load_dotenv()
 PORT = int(os.getenv("PORT", 10000))
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
+EXOTEL_ACCOUNT_SID = os.getenv("EXOTEL_ACCOUNT_SID")
+EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
+EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
+EXOTEL_TO_NUMBER = os.getenv("EXOTEL_TO_NUMBER")
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# --------------------------------------------------
+# AUDIO
+# --------------------------------------------------
 SAMPLE_RATE = 16000
 MIN_CHUNK_SIZE = 3200
 SPEECH_THRESHOLD = 500
@@ -744,23 +757,59 @@ SILENCE_CHUNKS = 6
 # --------------------------------------------------
 # LOGGING
 # --------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-    force=True
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("voicebot")
 
 # --------------------------------------------------
-# FASTAPI
+# APP
 # --------------------------------------------------
 app = FastAPI()
 
 # --------------------------------------------------
-# AUDIO UTILS
+# IN-MEMORY STATE
 # --------------------------------------------------
-def pcm_to_wav(pcm: bytes) -> bytes:
+CALL_STATE = {}  # call_id → state
+
+STEPS = [
+    "Step 1: Download the Rupeek app from Play Store.",
+    "Step 2: Complete basic KYC.",
+    "Step 3: Select loan amount and get instant disbursal."
+]
+
+FAQS = {
+    "interest": "The interest rate starts from ten percent per annum.",
+    "repayment": "Repayment happens automatically every month.",
+    "limit": "Your loan limit is pre-approved and visible in the app."
+}
+
+# --------------------------------------------------
+# EXOTEL DIAL (POSTMAN CALLS THIS)
+# --------------------------------------------------
+@app.post("/dial")
+def dial(payload: dict):
+    phone = payload["phone"]
+
+    r = requests.post(
+        f"https://api.exotel.com/v1/Accounts/{EXOTEL_ACCOUNT_SID}/Calls/connect.json",
+        auth=(EXOTEL_API_KEY, EXOTEL_API_TOKEN),
+        data={
+            "From": phone,
+            "CallerId": EXOTEL_TO_NUMBER,
+            "Url": "http://my.exotel.com/rupeekfintech13/exoml/start_voice/1105077"
+        }
+    )
+
+    r.raise_for_status()
+    call_sid = r.json()["Call"]["Sid"]
+    CALL_STATE[call_sid] = {"step": -1}
+
+    logger.info(f"📞 Dialed {phone} | CallSid={call_sid}")
+    return JSONResponse({"status": "calling", "callSid": call_sid})
+
+# --------------------------------------------------
+# UTILS
+# --------------------------------------------------
+def pcm_to_wav(pcm):
     buf = io.BytesIO()
     buf.write(b"RIFF")
     buf.write(struct.pack("<I", 36 + len(pcm)))
@@ -772,192 +821,139 @@ def pcm_to_wav(pcm: bytes) -> bytes:
     buf.write(pcm)
     return buf.getvalue()
 
-def is_speech(pcm: bytes) -> bool:
-    total, count = 0, 0
-    for i in range(0, len(pcm) - 1, 2):
-        s = int.from_bytes(pcm[i:i+2], "little", signed=True)
-        total += abs(s)
-        count += 1
-    return count > 0 and (total / count) > SPEECH_THRESHOLD
-
-# --------------------------------------------------
-# SARVAM
-# --------------------------------------------------
-def sarvam_stt(pcm: bytes) -> str:
+def sarvam_stt(pcm):
     wav = pcm_to_wav(pcm)
-    resp = requests.post(
+    r = requests.post(
         "https://api.sarvam.ai/speech-to-text",
         headers={"api-subscription-key": SARVAM_API_KEY},
-        files={"file": ("audio.wav", wav, "audio/wav")},
-        data={"language_code": "en-IN"},
-        timeout=15
+        files={"file": ("audio.wav", wav)},
+        data={"language_code": "en-IN"}
     )
-    resp.raise_for_status()
-    return resp.json().get("transcript", "").strip()
+    return r.json().get("transcript", "")
 
-def sarvam_tts(text: str) -> bytes:
-    resp = requests.post(
+def sarvam_tts(text):
+    r = requests.post(
         "https://api.sarvam.ai/text-to-speech",
-        headers={
-            "api-subscription-key": SARVAM_API_KEY,
-            "Content-Type": "application/json"
-        },
+        headers={"api-subscription-key": SARVAM_API_KEY},
         json={
             "text": text,
             "target_language_code": "en-IN",
             "speech_sample_rate": "16000"
-        },
-        timeout=10
+        }
     )
-    resp.raise_for_status()
-    return base64.b64decode(resp.json()["audios"][0])
+    return base64.b64decode(r.json()["audios"][0])
 
-# --------------------------------------------------
-# INTENT CLASSIFIER (FAST)
-# --------------------------------------------------
-def classify_intent(text: str) -> str:
-    text = text.lower()
-
-    if re.search(r"\b(yes|yeah|interested|ok|okay|sure)\b", text):
-        return "YES"
-
-    if re.search(r"\b(no|not interested|later|busy)\b", text):
-        return "NO"
-
-    if re.search(r"\b(interest|rate|emi|repay|limit)\b", text):
-        return "QUESTION"
-
-    return "UNKNOWN"
-
-# --------------------------------------------------
-# PRE-GENERATED RESPONSES (CACHED)
-# --------------------------------------------------
-PITCH_TEXT = (
-    "Hello, this is Rupeek personal loan team. "
-    "You have a pre approved personal loan available. "
-    "Would you like to proceed or need more details?"
-)
-
-GUIDE_TEXT = (
-    "Great. Please open the Rupeek app to complete the process. "
-    "It takes only sixty seconds. Thank you."
-)
-
-THANK_YOU_TEXT = "Thank you for your time. Have a great day."
-
-FAQ_REPLY = (
-    "This is a zero percent interest offer if repaid within the month. "
-    "If not, it converts to a normal personal loan."
-)
-
-CACHE = {}
-
-def get_cached_tts(key: str, text: str) -> bytes:
-    if key not in CACHE:
-        CACHE[key] = sarvam_tts(text)
-    return CACHE[key]
-
-# --------------------------------------------------
-# AUDIO SEND
-# --------------------------------------------------
-async def send_pcm(ws: WebSocket, pcm: bytes):
+async def send_pcm(ws, pcm):
     for i in range(0, len(pcm), MIN_CHUNK_SIZE):
         await ws.send_text(json.dumps({
             "event": "media",
-            "media": {
-                "payload": base64.b64encode(
-                    pcm[i:i + MIN_CHUNK_SIZE]
-                ).decode()
-            }
+            "media": {"payload": base64.b64encode(pcm[i:i+MIN_CHUNK_SIZE]).decode()}
         }))
-        await asyncio.sleep(0)
 
 # --------------------------------------------------
-# WEBSOCKET HANDLER
+# OPENAI INTENT
+# --------------------------------------------------
+def classify_intent(text):
+    prompt = f"""
+User said: "{text}"
+
+Classify intent strictly as one of:
+yes, no, next, repeat, done, help, faq
+Return only intent.
+"""
+    r = client.responses.create(
+        model="gpt-4.1-mini",
+        input=prompt
+    )
+    return r.output_text.strip().lower()
+
+# --------------------------------------------------
+# WEBSOCKET (VOICEBOT)
 # --------------------------------------------------
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
     await ws.accept()
-    logger.info("📞 Call connected")
+    logger.info("🎧 Call connected")
 
-    state = "CALL_STARTED"
-    buffer = b""
-    speech_buffer = b""
-    silence_count = 0
+    buffer, speech, silence = b"", b"", 0
+    call_sid = None
 
     try:
         while True:
-            msg = await ws.receive()
-            if "text" not in msg:
-                continue
-
-            data = json.loads(msg["text"])
+            msg = await ws.receive_text()
+            data = json.loads(msg)
             event = data.get("event")
 
-            # ---- PLAY PITCH ----
-            if event == "start" and state == "CALL_STARTED":
-                pcm = get_cached_tts("PITCH", PITCH_TEXT)
+            if event == "start":
+                call_sid = data.get("callSid")
+                greeting = "Hello! Are you interested in a Rupeek personal loan?"
+                pcm = sarvam_tts(greeting)
                 await send_pcm(ws, pcm)
-                state = "WAITING_FOR_RESPONSE"
-                continue
 
             if event != "media":
                 continue
 
-            payload = data["media"].get("payload")
-            if not payload:
-                continue
-
-            chunk = base64.b64decode(payload)
+            chunk = base64.b64decode(data["media"]["payload"])
             buffer += chunk
 
             if len(buffer) < MIN_CHUNK_SIZE:
                 continue
 
-            frame = buffer[:MIN_CHUNK_SIZE]
-            buffer = buffer[MIN_CHUNK_SIZE:]
+            frame, buffer = buffer[:MIN_CHUNK_SIZE], buffer[MIN_CHUNK_SIZE:]
 
-            if is_speech(frame):
-                speech_buffer += frame
-                silence_count = 0
+            avg = sum(abs(int.from_bytes(frame[i:i+2], "little", signed=True))
+                      for i in range(0, len(frame), 2)) / (len(frame)//2)
+
+            if avg > SPEECH_THRESHOLD:
+                speech += frame
+                silence = 0
             else:
-                silence_count += 1
+                silence += 1
 
-            # ---- END OF UTTERANCE ----
-            if silence_count >= SILENCE_CHUNKS and speech_buffer:
-                text = await asyncio.to_thread(sarvam_stt, speech_buffer)
-                speech_buffer = b""
-                silence_count = 0
+            if silence >= SILENCE_CHUNKS and speech:
+                text = sarvam_stt(speech)
+                speech = b""
 
-                if not text:
-                    continue
-
-                logger.info(f"🗣 User said: {text}")
                 intent = classify_intent(text)
+                state = CALL_STATE.get(call_sid, {"step": -1})
 
-                if intent == "YES":
-                    pcm = get_cached_tts("GUIDE", GUIDE_TEXT)
-                    await send_pcm(ws, pcm)
-                    break
+                if intent == "no":
+                    reply = "Thank you for your time. Goodbye!"
+                    await send_pcm(ws, sarvam_tts(reply))
+                    await ws.close()
+                    return
 
-                if intent == "NO":
-                    pcm = get_cached_tts("THANKS", THANK_YOU_TEXT)
-                    await send_pcm(ws, pcm)
-                    break
+                if intent == "yes" or intent == "next":
+                    state["step"] += 1
+                    if state["step"] < len(STEPS):
+                        reply = STEPS[state["step"]]
+                    else:
+                        reply = "Process completed. Thank you!"
+                        await send_pcm(ws, sarvam_tts(reply))
+                        await ws.close()
+                        return
 
-                if intent == "QUESTION":
-                    pcm = get_cached_tts("FAQ", FAQ_REPLY)
-                    await send_pcm(ws, pcm)
-                    continue
+                elif intent == "repeat":
+                    reply = STEPS[state["step"]]
 
-                pcm = get_cached_tts("REPEAT", PITCH_TEXT)
-                await send_pcm(ws, pcm)
+                elif intent == "help":
+                    logger.warning(f"🚨 Human help needed: {call_sid}")
+                    reply = "I will connect you to our team shortly."
+                    await send_pcm(ws, sarvam_tts(reply))
+                    await ws.close()
+                    return
+
+                else:
+                    reply = "Please say yes, next, repeat, or no."
+
+                CALL_STATE[call_sid] = state
+                await send_pcm(ws, sarvam_tts(reply))
 
     except WebSocketDisconnect:
         logger.info("🔌 Call disconnected")
 
 # --------------------------------------------------
-# RUN
+# START
 # --------------------------------------------------
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
