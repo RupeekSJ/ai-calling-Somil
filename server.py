@@ -509,7 +509,7 @@
 # # ==================================================
 # if __name__ == "__main__":
 #     uvicorn.run(app, host="0.0.0.0", port=PORT)
-import os, json, asyncio, logging, sys, base64, requests, io, struct, time
+iimport os, json, asyncio, logging, sys, base64, requests, io, struct, time
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
@@ -522,7 +522,7 @@ PORT = int(os.getenv("PORT", 10000))
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
 # ==================================================
-# AUDIO CONFIG (NOISE SAFE)
+# AUDIO CONFIG
 # ==================================================
 SAMPLE_RATE = 16000
 MIN_CHUNK_SIZE = 3200
@@ -550,7 +550,7 @@ app = FastAPI()
 SESSIONS = {}
 
 # ==================================================
-# PITCH (SINGLE STRING – SAFE LENGTH)
+# PITCH
 # ==================================================
 PITCH = (
     "Hi, my name is Neeraja, calling from Rupeek. "
@@ -572,11 +572,12 @@ STEPS = [
 ]
 
 # ==================================================
-# FAQS (ROBUST KEYWORDS)
+# FAQS
 # ==================================================
 FAQS = [
     (["loan", "amount", "eligible", "limit", "approved"],
-     "The loan amount is personalized for each customer. You can check your approved limit in the Rupeek app under Click Cash."),
+     "The loan amount is personalized for each customer. "
+     "You can check your approved limit in the Rupeek app under Click Cash."),
 
     (["roi", "interest", "miss", "late", "repayment"],
      "If the loan repayment is missed, the loan converts to EMI with interest as shown in the app."),
@@ -585,43 +586,47 @@ FAQS = [
      "Yes, there will be no interest if you repay before the month end."),
 
     (["emi", "monthly", "payment"],
-     "The EMI depends on the tenure you select. The Rupeek app clearly shows the exact EMI amount."),
+     "The EMI depends on the tenure you select. "
+     "The Rupeek app clearly shows the exact EMI amount."),
 
     (["processing", "fee", "pf", "gst", "credit"],
      "Zero interest applies only if you repay within the same month. "
-     "The processing fee is a one time charge for instant digital disbursal. "
-     "Other products recover similar costs through annual fees and higher charges."),
+     "The processing fee is a one time charge for instant digital disbursal."),
 
     (["app", "shows", "32", "1.45"],
-     "The app shows standard EMI interest. If you repay by month end, no interest is charged."),
-
-    (["two", "lakh", "30000", "reduced"],
-     "Currently your eligible amount is thirty thousand rupees. "
-     "With timely repayments, your limit increases automatically.")
+     "The app shows standard EMI interest. "
+     "If you repay by month end, no interest is charged."),
 ]
 
 # ==================================================
-# INTENT CLASSIFIER
+# INTENT CLASSIFIER (FIXED PRIORITY)
 # ==================================================
 def classify(text: str):
-    t = text.lower()
+    t = text.lower().strip()
 
+    # HIGH PRIORITY FIRST
+    if any(x in t for x in ["yes", "interested", "ok", "okay", "sure"]):
+        return "YES", None
+
+    if any(x in t for x in ["no", "not interested", "stop"]):
+        return "NO", None
+
+    if any(x in t for x in ["next", "continue"]):
+        return "NEXT", None
+
+    if any(x in t for x in ["done", "complete"]):
+        return "DONE", None
+
+    if any(x in t for x in ["repeat", "again"]):
+        return "REPEAT", None
+
+    if any(x in t for x in ["previous", "back"]):
+        return "PREVIOUS", None
+
+    # FAQ LAST
     for keys, _ in FAQS:
         if any(k in t for k in keys):
             return "FAQ", keys
-
-    if any(x in t for x in ["yes", "interested", "ok", "okay"]):
-        return "YES", None
-    if any(x in t for x in ["no", "not interested"]):
-        return "NO", None
-    if any(x in t for x in ["next", "continue"]):
-        return "NEXT", None
-    if any(x in t for x in ["repeat", "again"]):
-        return "REPEAT", None
-    if any(x in t for x in ["previous", "back", "last"]):
-        return "PREVIOUS", None
-    if any(x in t for x in ["done", "complete"]):
-        return "DONE", None
 
     return "UNKNOWN", None
 
@@ -647,7 +652,7 @@ def pcm_to_wav(pcm):
     return buf.getvalue()
 
 # ==================================================
-# SARVAM
+# SARVAM API
 # ==================================================
 def stt(pcm):
     r = requests.post(
@@ -685,7 +690,6 @@ async def speak(ws, text, session):
             "event": "media",
             "media": {"payload": base64.b64encode(pcm[i:i+MIN_CHUNK_SIZE]).decode()}
         }))
-        await asyncio.sleep(0)
     await asyncio.sleep(POST_TTS_DELAY)
     session["bot_speaking"] = False
 
@@ -704,7 +708,6 @@ async def ws_handler(ws: WebSocket):
         "started": False,
         "bot_speaking": False
     }
-    SESSIONS[sid] = session
 
     buf, speech = b"", b""
     silence, speech_chunks = 0, 0
@@ -717,11 +720,13 @@ async def ws_handler(ws: WebSocket):
 
             data = json.loads(msg["text"])
 
+            # START → PLAY FULL PITCH (LOCKED)
             if data.get("event") == "start" and not session["started"]:
                 await speak(ws, PITCH, session)
                 session["started"] = True
                 continue
 
+            # Ignore input while bot speaking
             if data.get("event") != "media" or session["bot_speaking"]:
                 continue
 
@@ -752,29 +757,31 @@ async def ws_handler(ws: WebSocket):
 
             intent, meta = classify(text)
 
-            # FAQ
-            if intent == "FAQ":
-                for keys, ans in FAQS:
-                    if keys == meta:
-                        await speak(ws, ans, session)
-                        await speak(ws, "You can say next, repeat, previous, or ask another question.", session)
-                        break
-                continue
-
-            # PITCH
+            # ---------------- PITCH (HARD LOCK) ----------------
             if session["phase"] == "PITCH":
                 if intent == "YES":
                     session["phase"] = "STEPS"
                     await speak(ws, STEPS[0], session)
                     continue
+
                 if intent == "NO":
                     await speak(ws, "Thank you for your time. Have a great day.", session)
                     await asyncio.sleep(FINAL_WAIT)
                     break
+
                 await speak(ws, "Please say yes if interested or no to decline.", session)
                 continue
 
-            # STEPS
+            # ---------------- FAQ (AFTER PITCH ONLY) ----------------
+            if intent == "FAQ":
+                for keys, ans in FAQS:
+                    if keys == meta:
+                        await speak(ws, ans, session)
+                        await speak(ws, "You can say next, repeat, or done.", session)
+                        break
+                continue
+
+            # ---------------- STEPS ----------------
             if intent == "NEXT":
                 session["step"] += 1
                 if session["step"] >= len(STEPS):
@@ -798,13 +805,13 @@ async def ws_handler(ws: WebSocket):
                 await asyncio.sleep(FINAL_WAIT)
                 break
 
-            await speak(ws, "Please say next, repeat, previous, or done.", session)
+            await speak(ws, "Please say next, repeat, or done.", session)
 
     except WebSocketDisconnect:
         log.info(f"🔌 Call disconnected | {sid}")
 
 # ==================================================
-# START
+# START SERVER
 # ==================================================
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
