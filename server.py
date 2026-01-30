@@ -13,15 +13,14 @@ SAMPLE_RATE = 16000
 MIN_CHUNK_SIZE = 3200
 SPEECH_THRESHOLD = 520
 
-SILENCE_CHUNKS = 8
+SILENCE_CHUNKS = 10
 MIN_SPEECH_CHUNKS = 6
 
 POST_TTS_DELAY = 0.6
-FAIL_COOLDOWN_SEC = 6
-FINAL_WAIT = 2.5
+FAIL_COOLDOWN_SEC = 8
 
 MAX_CONFUSION = 3
-MAX_SILENCE = 5
+MAX_SILENCE_PROMPTS = 2
 
 # ================= LOGGING =================
 logging.basicConfig(
@@ -35,7 +34,7 @@ log = logging.getLogger("voicebot")
 # ================= APP =================
 app = FastAPI()
 
-# ================= PITCH =================
+# ================= SCRIPT =================
 PITCH_1 = (
     "Hi, my name is Neeraja, calling from Rupeek. "
     "You have a pre approved personal loan at zero interest."
@@ -48,27 +47,21 @@ PITCH_2 = (
     "This is a limited time offer. Are you interested?"
 )
 
-# ================= STEPS =================
 STEPS = [
     "Step one. Download the Rupeek app from the Play Store. Say next once done.",
     "Step two. Complete your KYC using Aadhaar. Say next once completed.",
     "Step three. Select your loan amount and confirm disbursal. Say done to finish."
 ]
 
-# ================= FAQS =================
 FAQS = [
-    (["loan", "amount", "eligible", "limit"],
-     "The loan amount is personalized for each customer. You can check your approved limit in the Rupeek app under Click Cash."),
-
-    (["emi", "monthly"],
-     "The EMI depends on the tenure you select. The Rupeek app clearly shows the exact EMI amount."),
-
-    (["interest", "roi", "miss"],
-     "If repayment is missed, the loan converts into EMI with interest as shown in the app."),
-
-    (["processing", "fee", "pf"],
-     "Zero interest applies if you repay within the same month. The processing fee is a one time charge for instant digital disbursal."),
+    (["emi", "monthly"], "The EMI depends on the tenure you select. The app shows the exact EMI amount."),
+    (["interest", "roi"], "If repayment is missed, the loan converts into EMI with interest as shown in the app."),
+    (["limit", "amount"], "Your approved loan amount is visible inside the Rupeek app."),
+    (["processing", "fee"], "The processing fee is a one time charge for instant digital disbursal.")
 ]
+
+NEUTRAL_WORDS = ["okay", "ok", "right", "nice", "thanks", "thank you", "fine"]
+PARTIAL_QUESTIONS = ["what is", "what", "rate", "interest", "emi", "amount"]
 
 # ================= INTENT =================
 def classify(text):
@@ -77,28 +70,34 @@ def classify(text):
     if not t:
         return "EMPTY", None
 
+    if any(x in t for x in NEUTRAL_WORDS):
+        return "NEUTRAL", None
+
+    if any(t.startswith(p) for p in PARTIAL_QUESTIONS):
+        return "PARTIAL", None
+
     if any(x in t for x in ["hello", "hi", "hey"]):
         return "GREETING", None
 
-    if any(x in t for x in ["yes", "interested", "ok", "okay", "sure"]):
+    if any(x in t for x in ["yes", "interested", "sure"]):
         return "YES", None
 
     if any(x in t for x in ["no", "not interested"]):
         return "NO", None
 
-    if any(x in t for x in ["next", "continue"]):
+    if any(x in t for x in ["next"]):
         return "NEXT", None
 
     if any(x in t for x in ["previous", "back"]):
         return "PREVIOUS", None
 
-    if any(x in t for x in ["repeat", "again"]):
+    if any(x in t for x in ["repeat"]):
         return "REPEAT", None
 
     if any(x in t for x in ["done", "complete"]):
         return "DONE", None
 
-    if any(x in t for x in ["agent", "human", "representative", "connect"]):
+    if any(x in t for x in ["agent", "human", "representative"]):
         return "HUMAN", None
 
     for keys, _ in FAQS:
@@ -107,7 +106,7 @@ def classify(text):
 
     return "UNKNOWN", None
 
-# ================= AUDIO UTILS =================
+# ================= AUDIO =================
 def is_speech(pcm):
     energy = sum(abs(int.from_bytes(pcm[i:i+2], "little", signed=True))
                  for i in range(0, len(pcm)-1, 2))
@@ -125,7 +124,6 @@ def pcm_to_wav(pcm):
     buf.write(pcm)
     return buf.getvalue()
 
-# ================= SARVAM =================
 def stt_safe(pcm):
     try:
         r = requests.post(
@@ -135,25 +133,15 @@ def stt_safe(pcm):
             data={"language_code": "en-IN"},
             timeout=10
         )
-        if r.status_code != 200:
-            return ""
-        return r.json().get("transcript", "").strip()
-    except Exception as e:
-        log.error(f"STT error: {e}")
+        return r.json().get("transcript", "").strip() if r.status_code == 200 else ""
+    except:
         return ""
 
 def tts(text):
     r = requests.post(
         "https://api.sarvam.ai/text-to-speech",
-        headers={
-            "api-subscription-key": SARVAM_API_KEY,
-            "Content-Type": "application/json"
-        },
-        json={
-            "text": text,
-            "target_language_code": "en-IN",
-            "speech_sample_rate": "16000"
-        },
+        headers={"api-subscription-key": SARVAM_API_KEY, "Content-Type": "application/json"},
+        json={"text": text, "target_language_code": "en-IN", "speech_sample_rate": "16000"},
         timeout=10
     )
     r.raise_for_status()
@@ -164,10 +152,7 @@ async def speak(ws, text, session):
     session["bot_speaking"] = True
     pcm = await asyncio.to_thread(tts, text)
     for i in range(0, len(pcm), MIN_CHUNK_SIZE):
-        await ws.send_text(json.dumps({
-            "event": "media",
-            "media": {"payload": base64.b64encode(pcm[i:i+MIN_CHUNK_SIZE]).decode()}
-        }))
+        await ws.send_text(json.dumps({"event": "media", "media": {"payload": base64.b64encode(pcm[i:i+MIN_CHUNK_SIZE]).decode()}}))
     await asyncio.sleep(POST_TTS_DELAY)
     session["bot_speaking"] = False
 
@@ -180,11 +165,12 @@ async def ws_handler(ws: WebSocket):
     session = {
         "phase": "PITCH",
         "step": 0,
-        "bot_speaking": False,
         "failures": 0,
-        "silence": 0,
-        "last_fail_ts": 0,
-        "started": False
+        "silence_prompts": 0,
+        "handoff_asked": False,
+        "bot_speaking": False,
+        "started": False,
+        "last_fail_ts": 0
     }
 
     buf, speech = b"", b""
@@ -229,33 +215,27 @@ async def ws_handler(ws: WebSocket):
             speech, speech_chunks, silence_chunks = b"", 0, 0
 
             if not text:
-                session["silence"] += 1
-                log.warning("🔇 Silence detected")
                 continue
 
-            log.info(f"🗣 USER → {text}")
             intent, meta = classify(text)
+            log.info(f"🗣 USER → {text} | intent={intent}")
 
-            # GREETING
-            if intent == "GREETING":
-                await speak(ws, "Hello. You can say yes if interested or no to decline.", session)
-                continue
+            # reset failures on healthy interaction
+            if intent in ["FAQ", "NEXT", "PREVIOUS", "REPEAT", "GREETING", "NEUTRAL"]:
+                session["failures"] = 0
+                session["handoff_asked"] = False
 
-            # HUMAN
-            if intent == "HUMAN":
-                await speak(ws, "Connecting you to a representative now.", session)
-                break
+            if intent == "PARTIAL":
+                continue  # wait for completion
 
-            # FAQ
             if intent == "FAQ":
                 for keys, ans in FAQS:
                     if keys == meta:
                         await speak(ws, ans, session)
-                        await speak(ws, "You may say next, repeat, or previous.", session)
+                        await speak(ws, "You can say next, repeat, or previous.", session)
                         break
                 continue
 
-            # PITCH
             if session["phase"] == "PITCH":
                 if intent == "YES":
                     session["phase"] = "STEPS"
@@ -263,15 +243,12 @@ async def ws_handler(ws: WebSocket):
                     continue
                 if intent == "NO":
                     await speak(ws, "Thank you for your time. Have a great day.", session)
-                    await asyncio.sleep(FINAL_WAIT)
                     break
 
-            # STEPS
             if intent == "NEXT":
                 session["step"] += 1
                 if session["step"] >= len(STEPS):
                     await speak(ws, "Your process is complete. Thank you.", session)
-                    await asyncio.sleep(FINAL_WAIT)
                     break
                 await speak(ws, STEPS[session["step"]], session)
                 continue
@@ -285,19 +262,21 @@ async def ws_handler(ws: WebSocket):
                 await speak(ws, STEPS[session["step"]], session)
                 continue
 
-            # UNKNOWN — COOLDOWN CONTROLLED
+            if intent == "HUMAN":
+                await speak(ws, "Connecting you to a representative now.", session)
+                break
+
+            # UNKNOWN
             now = time.time()
             if now - session["last_fail_ts"] > FAIL_COOLDOWN_SEC:
                 session["failures"] += 1
                 session["last_fail_ts"] = now
 
-                log.warning(f"⚠️ Failure count: {session['failures']}")
-
-                if session["failures"] >= MAX_CONFUSION:
+                if session["failures"] >= MAX_CONFUSION and not session["handoff_asked"]:
+                    session["handoff_asked"] = True
                     await speak(ws, "Would you like me to connect you to a representative?", session)
-                    session["failures"] = 0
                 else:
-                    await speak(ws, "Please say next, repeat, previous, or no.", session)
+                    await speak(ws, "You can say next, repeat, previous, or no.", session)
 
     except WebSocketDisconnect:
         log.info("🔌 Call disconnected")
