@@ -553,18 +553,8 @@ SESSIONS = {}
 # ==================================================
 # PITCH (AS PROVIDED)
 # ==================================================
-PITCH = (
-    "Hi, my name is Neeraja, calling from Rupeek. "
-    "You have a pre approved personal loan at zero interest, "
-    "which means you do not have to pay any interest if you repay the amount within the same month. "
-    "It works like a credit line. "
-    "You can withdraw money whenever you need, and you repay only what you use. "
-    "You can even withdraw again every month with zero interest, as long as it is repaid within the month. "
-    "The process is one hundred percent digital, with no income proof and no paperwork required. "
-    "You can receive instant disbursal to your bank account in just sixty seconds. "
-    "With timely repayments, you can boost your CIBIL score and unlock higher limits in future without any interest. "
-    "This is a limited time offer. Are you interested?"
-)
+PITCH = "Hi, my name is Neeraja, calling from Rupeek. You have a pre approved personal loan at zero interest, which means you do not have to pay any interest if you repay the amount within the same month. It works like a credit line. You can withdraw money whenever you need, and you repay only what you use. You can even withdraw again every month with zero interest, as long as it is repaid within the month. The process is one hundred percent digital, with no income proof and no paperwork required. You can receive instant disbursal to your bank account in just sixty seconds. With timely repayments, you can boost your CIBIL score and unlock higher limits in future without any interest. This is a limited time offer. Are you interested?"
+
 
 # ==================================================
 # STEPS
