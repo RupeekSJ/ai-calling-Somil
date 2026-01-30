@@ -525,12 +525,11 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 # AUDIO CONFIG (NOISE SAFE)
 # ==================================================
 SAMPLE_RATE = 16000
-MIN_CHUNK_SIZE = 3200           # 100ms
-SPEECH_THRESHOLD = 550
-SILENCE_CHUNKS = 8              # ~800ms silence
-MIN_SPEECH_CHUNKS = 12          # ~1.2s speech
-POST_TTS_DELAY = 0.8            # wait after bot speaks
-
+MIN_CHUNK_SIZE = 3200
+SPEECH_THRESHOLD = 600
+SILENCE_CHUNKS = 9
+MIN_SPEECH_CHUNKS = 14
+POST_TTS_DELAY = 1.0
 FINAL_WAIT = 2.5
 
 # ==================================================
@@ -551,10 +550,17 @@ app = FastAPI()
 SESSIONS = {}
 
 # ==================================================
-# PITCH (AS PROVIDED)
+# PITCH (SINGLE STRING – SAFE LENGTH)
 # ==================================================
-PITCH = "Hi, my name is Neeraja, calling from Rupeek, You have a pre approved personal loan at zero interest, which means you pay no interest if you repay within the same month, The process is completely digital with no paperwork, and you can receive instant disbursal to your bank account in just sixty seconds, With timely repayments, you can improve your CIBIL score and unlock higher limits in the future, This is a limited time offer, Are you interested?"
-
+PITCH = (
+    "Hi, my name is Neeraja, calling from Rupeek. "
+    "You have a pre approved personal loan at zero interest, "
+    "which means you pay no interest if you repay within the same month. "
+    "The process is completely digital with no paperwork, "
+    "and you can receive instant disbursal to your bank account in sixty seconds. "
+    "With timely repayments, you can improve your CIBIL score and unlock higher limits in the future. "
+    "This is a limited time offer. Are you interested?"
+)
 
 # ==================================================
 # STEPS
@@ -566,48 +572,32 @@ STEPS = [
 ]
 
 # ==================================================
-# FAQS (FULL ANSWERS – NOT SHORTENED)
+# FAQS (ROBUST KEYWORDS)
 # ==================================================
 FAQS = [
-    (
-        ["loan amount", "eligible", "approved", "limit"],
-        "The loan amount is personalized for each customer. "
-        "You can check your approved limit in the Rupeek app under Click Cash."
-    ),
-    (
-        ["roi", "miss payment", "repayment due date"],
-        "If the loan repayment is missed, the loan converts to EMI with interest as shown in the app."
-    ),
-    (
-        ["zero interest", "0 percent", "really zero"],
-        "Yes, there will be no interest if you repay before the month end."
-    ),
-    (
-        ["emi amount", "monthly emi"],
-        "The EMI depends on the tenure you select. The app shows the exact EMI amount."
-    ),
-    (
-        ["processing fee", "pf", "gst", "credit card"],
-        "Zero interest applies to the amount you use if you repay within the same month. "
-        "The processing fee is a one time standard charge for instant digital disbursal. "
-        "In credit cards, similar costs are recovered through annual fees and high cash withdrawal charges. "
-        "Here you pay a transparent one time fee with no recurring interest."
-    ),
-    (
-        ["app shows interest", "1.45", "32"],
-        "The app shows the standard ROI for EMI. "
-        "If you repay by month end you do not have to pay any interest. "
-        "If you do not repay, you can convert it into easy EMI."
-    ),
-    (
-        ["repay date", "month end"],
-        "You are required to repay the amount by month end to avail zero interest."
-    ),
-    (
-        ["two lakh", "30000", "reduced amount"],
-        "Currently, based on system checks, your eligible amount is thirty thousand rupees. "
-        "With timely repayments, your eligibility increases automatically in the future."
-    )
+    (["loan", "amount", "eligible", "limit", "approved"],
+     "The loan amount is personalized for each customer. You can check your approved limit in the Rupeek app under Click Cash."),
+
+    (["roi", "interest", "miss", "late", "repayment"],
+     "If the loan repayment is missed, the loan converts to EMI with interest as shown in the app."),
+
+    (["zero", "0", "really", "free"],
+     "Yes, there will be no interest if you repay before the month end."),
+
+    (["emi", "monthly", "payment"],
+     "The EMI depends on the tenure you select. The Rupeek app clearly shows the exact EMI amount."),
+
+    (["processing", "fee", "pf", "gst", "credit"],
+     "Zero interest applies only if you repay within the same month. "
+     "The processing fee is a one time charge for instant digital disbursal. "
+     "Other products recover similar costs through annual fees and higher charges."),
+
+    (["app", "shows", "32", "1.45"],
+     "The app shows standard EMI interest. If you repay by month end, no interest is charged."),
+
+    (["two", "lakh", "30000", "reduced"],
+     "Currently your eligible amount is thirty thousand rupees. "
+     "With timely repayments, your limit increases automatically.")
 ]
 
 # ==================================================
@@ -624,11 +614,13 @@ def classify(text: str):
         return "YES", None
     if any(x in t for x in ["no", "not interested"]):
         return "NO", None
-    if "next" in t:
+    if any(x in t for x in ["next", "continue"]):
         return "NEXT", None
-    if "repeat" in t:
+    if any(x in t for x in ["repeat", "again"]):
         return "REPEAT", None
-    if "done" in t:
+    if any(x in t for x in ["previous", "back", "last"]):
+        return "PREVIOUS", None
+    if any(x in t for x in ["done", "complete"]):
         return "DONE", None
 
     return "UNKNOWN", None
@@ -636,13 +628,13 @@ def classify(text: str):
 # ==================================================
 # AUDIO UTILS
 # ==================================================
-def is_speech(pcm: bytes) -> bool:
+def is_speech(pcm):
     energy = sum(abs(int.from_bytes(pcm[i:i+2], "little", signed=True))
                  for i in range(0, len(pcm)-1, 2))
     avg = energy / max(len(pcm)//2, 1)
     return avg > SPEECH_THRESHOLD
 
-def pcm_to_wav(pcm: bytes) -> bytes:
+def pcm_to_wav(pcm):
     buf = io.BytesIO()
     buf.write(b"RIFF")
     buf.write(struct.pack("<I", 36 + len(pcm)))
@@ -657,7 +649,7 @@ def pcm_to_wav(pcm: bytes) -> bytes:
 # ==================================================
 # SARVAM
 # ==================================================
-def stt(pcm: bytes) -> str:
+def stt(pcm):
     r = requests.post(
         "https://api.sarvam.ai/speech-to-text",
         headers={"api-subscription-key": SARVAM_API_KEY},
@@ -668,7 +660,7 @@ def stt(pcm: bytes) -> str:
     r.raise_for_status()
     return r.json().get("transcript", "").strip()
 
-def tts(text: str) -> bytes:
+def tts(text):
     r = requests.post(
         "https://api.sarvam.ai/text-to-speech",
         headers={
@@ -685,7 +677,8 @@ def tts(text: str) -> bytes:
     r.raise_for_status()
     return base64.b64decode(r.json()["audios"][0])
 
-async def speak(ws: WebSocket, text: str):
+async def speak(ws, text, session):
+    session["bot_speaking"] = True
     pcm = await asyncio.to_thread(tts, text)
     for i in range(0, len(pcm), MIN_CHUNK_SIZE):
         await ws.send_text(json.dumps({
@@ -694,6 +687,7 @@ async def speak(ws: WebSocket, text: str):
         }))
         await asyncio.sleep(0)
     await asyncio.sleep(POST_TTS_DELAY)
+    session["bot_speaking"] = False
 
 # ==================================================
 # WEBSOCKET
@@ -704,11 +698,13 @@ async def ws_handler(ws: WebSocket):
     sid = str(time.time())
     log.info(f"🎧 Call connected | {sid}")
 
-    SESSIONS[sid] = {
+    session = {
         "phase": "PITCH",
         "step": 0,
-        "started": False
+        "started": False,
+        "bot_speaking": False
     }
+    SESSIONS[sid] = session
 
     buf, speech = b"", b""
     silence, speech_chunks = 0, 0
@@ -721,12 +717,12 @@ async def ws_handler(ws: WebSocket):
 
             data = json.loads(msg["text"])
 
-            if data.get("event") == "start" and not SESSIONS[sid]["started"]:
-                await speak(ws, PITCH)
-                SESSIONS[sid]["started"] = True
+            if data.get("event") == "start" and not session["started"]:
+                await speak(ws, PITCH, session)
+                session["started"] = True
                 continue
 
-            if data.get("event") != "media":
+            if data.get("event") != "media" or session["bot_speaking"]:
                 continue
 
             chunk = base64.b64decode(data["media"]["payload"])
@@ -756,52 +752,53 @@ async def ws_handler(ws: WebSocket):
 
             intent, meta = classify(text)
 
-            # ---------- FAQ ----------
+            # FAQ
             if intent == "FAQ":
                 for keys, ans in FAQS:
                     if keys == meta:
-                        await speak(ws, ans)
-                        # return to current context
-                        if SESSIONS[sid]["phase"] == "STEPS":
-                            await speak(ws, STEPS[SESSIONS[sid]["step"]])
-                        else:
-                            await speak(ws, "Are you interested?")
+                        await speak(ws, ans, session)
+                        await speak(ws, "You can say next, repeat, previous, or ask another question.", session)
                         break
                 continue
 
-            # ---------- PITCH ----------
-            if SESSIONS[sid]["phase"] == "PITCH":
+            # PITCH
+            if session["phase"] == "PITCH":
                 if intent == "YES":
-                    SESSIONS[sid]["phase"] = "STEPS"
-                    await speak(ws, STEPS[0])
+                    session["phase"] = "STEPS"
+                    await speak(ws, STEPS[0], session)
                     continue
                 if intent == "NO":
-                    await speak(ws, "Thank you for your time. Have a great day.")
+                    await speak(ws, "Thank you for your time. Have a great day.", session)
                     await asyncio.sleep(FINAL_WAIT)
                     break
-                await speak(ws, "Please say yes if interested or no to decline.")
+                await speak(ws, "Please say yes if interested or no to decline.", session)
                 continue
 
-            # ---------- STEPS ----------
+            # STEPS
             if intent == "NEXT":
-                SESSIONS[sid]["step"] += 1
-                if SESSIONS[sid]["step"] >= len(STEPS):
-                    await speak(ws, "Your process is complete. Thank you.")
+                session["step"] += 1
+                if session["step"] >= len(STEPS):
+                    await speak(ws, "Your process is complete. Thank you.", session)
                     await asyncio.sleep(FINAL_WAIT)
                     break
-                await speak(ws, STEPS[SESSIONS[sid]["step"]])
+                await speak(ws, STEPS[session["step"]], session)
+                continue
+
+            if intent == "PREVIOUS":
+                session["step"] = max(0, session["step"] - 1)
+                await speak(ws, STEPS[session["step"]], session)
                 continue
 
             if intent == "REPEAT":
-                await speak(ws, STEPS[SESSIONS[sid]["step"]])
+                await speak(ws, STEPS[session["step"]], session)
                 continue
 
             if intent == "DONE":
-                await speak(ws, "Thank you. Your request is complete.")
+                await speak(ws, "Thank you. Your request is complete.", session)
                 await asyncio.sleep(FINAL_WAIT)
                 break
 
-            await speak(ws, "Please say next, repeat, or done.")
+            await speak(ws, "Please say next, repeat, previous, or done.", session)
 
     except WebSocketDisconnect:
         log.info(f"🔌 Call disconnected | {sid}")
