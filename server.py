@@ -524,10 +524,13 @@ SAMPLE_RATE = 16000
 MIN_CHUNK_SIZE = 3200
 
 SPEECH_THRESHOLD = 600
-MIN_SPEECH_CHUNKS = 6      # FAST
-SILENCE_CHUNKS = 3         # FAST
+MIN_SPEECH_CHUNKS = 6
+SILENCE_CHUNKS = 3
 POST_TTS_DELAY = 0.3
 FINAL_WAIT = 2.0
+
+MAX_EMPTY_STT = 3
+MAX_FAILS = 3
 
 # ================= LOGGING =================
 logging.basicConfig(
@@ -541,7 +544,7 @@ log = logging.getLogger("voicebot")
 # ================= APP =================
 app = FastAPI()
 
-# ================= PITCH (2 PHASE) =================
+# ================= PITCH =================
 PITCH_1 = (
     "Hi, my name is Neeraja, calling from Rupeek. "
     "You have a pre approved personal loan at zero interest."
@@ -594,6 +597,8 @@ def classify(text):
         return "NO", None
     if "next" in t:
         return "NEXT", None
+    if any(x in t for x in ["previous", "back"]):
+        return "PREVIOUS", None
     if "repeat" in t:
         return "REPEAT", None
     if "done" in t:
@@ -603,7 +608,7 @@ def classify(text):
             return "FAQ", keys
     return "UNKNOWN", None
 
-# ================= AUDIO UTILS =================
+# ================= AUDIO =================
 def is_speech(pcm):
     energy = sum(abs(int.from_bytes(pcm[i:i+2], "little", signed=True))
                  for i in range(0, len(pcm)-1, 2))
@@ -629,13 +634,12 @@ def stt_safe(pcm):
             headers={"api-subscription-key": SARVAM_API_KEY},
             files={"file": ("audio.wav", pcm_to_wav(pcm), "audio/wav")},
             data={"language_code": "en-IN"},
-            timeout=10
+            timeout=8
         )
         if r.status_code != 200:
             return ""
         return r.json().get("transcript", "").strip()
-    except Exception as e:
-        log.error(f"STT failed: {e}")
+    except Exception:
         return ""
 
 def tts(text):
@@ -650,7 +654,7 @@ def tts(text):
             "target_language_code": "en-IN",
             "speech_sample_rate": "16000"
         },
-        timeout=10
+        timeout=8
     )
     r.raise_for_status()
     return base64.b64decode(r.json()["audios"][0])
@@ -673,8 +677,11 @@ async def ws_handler(ws: WebSocket):
     session = {
         "phase": "PITCH",
         "step": 0,
+        "started": False,
         "bot_speaking": False,
-        "started": False
+        "empty_count": 0,
+        "fail_count": 0,
+        "human_offered": False
     }
 
     buf, speech = b"", b""
@@ -716,13 +723,35 @@ async def ws_handler(ws: WebSocket):
                 continue
 
             text = await asyncio.to_thread(stt_safe, speech)
-            log.info(f"🗣 User said: {text}")
-
             speech, speech_chunks, silence = b"", 0, 0
+
             if not text:
+                session["empty_count"] += 1
+                if session["empty_count"] >= MAX_EMPTY_STT:
+                    await speak(ws, "I am having trouble hearing you clearly. Would you like me to connect you to a representative?", session)
+                    session["human_offered"] = True
                 continue
 
+            session["empty_count"] = 0
+            log.info(f"🗣 User said: {text}")
+
             intent, meta = classify(text)
+
+            if session["human_offered"] and intent == "YES":
+                await speak(ws, "Please hold while I connect you to our representative.", session)
+                await asyncio.sleep(FINAL_WAIT)
+                break
+
+            if intent == "UNKNOWN":
+                session["fail_count"] += 1
+                if session["fail_count"] >= MAX_FAILS:
+                    await speak(ws, "Would you like to speak to a representative for further help?", session)
+                    session["human_offered"] = True
+                else:
+                    await speak(ws, "Sorry, I did not understand. You can say next, repeat, or done.", session)
+                continue
+
+            session["fail_count"] = 0
 
             if session["phase"] == "PITCH":
                 if intent == "YES":
@@ -732,8 +761,6 @@ async def ws_handler(ws: WebSocket):
                     await speak(ws, "Thank you for your time. Have a great day.", session)
                     await asyncio.sleep(FINAL_WAIT)
                     break
-                else:
-                    await speak(ws, "Please say yes if interested or no to decline.", session)
                 continue
 
             if intent == "FAQ":
@@ -752,6 +779,11 @@ async def ws_handler(ws: WebSocket):
                 await speak(ws, STEPS[session["step"]], session)
                 continue
 
+            if intent == "PREVIOUS":
+                session["step"] = max(0, session["step"] - 1)
+                await speak(ws, STEPS[session["step"]], session)
+                continue
+
             if intent == "REPEAT":
                 await speak(ws, STEPS[session["step"]], session)
                 continue
@@ -760,8 +792,6 @@ async def ws_handler(ws: WebSocket):
                 await speak(ws, "Thank you. Your request is complete.", session)
                 await asyncio.sleep(FINAL_WAIT)
                 break
-
-            await speak(ws, "Please say next, repeat, or done.", session)
 
     except WebSocketDisconnect:
         log.info("🔌 Call disconnected")
