@@ -510,7 +510,6 @@
 # if __name__ == "__main__":
 #     uvicorn.run(app, host="0.0.0.0", port=PORT)
 
-
 import os, json, asyncio, logging, sys, base64, requests, io, struct, time
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -521,19 +520,20 @@ load_dotenv()
 PORT = int(os.getenv("PORT", 10000))
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
-# ================= AUDIO CONFIG =================
+# ================= AUDIO =================
 SAMPLE_RATE = 16000
-MIN_CHUNK_SIZE = 3200           # 100 ms
-
+MIN_CHUNK_SIZE = 3200          # ~100ms
 SPEECH_THRESHOLD = 600
-MIN_SPEECH_CHUNKS = 4           # fast reaction
-SILENCE_CHUNKS = 2              # short silence
-POST_TTS_DELAY = 0.15
+MIN_SPEECH_CHUNKS = 6          # fast response
+SILENCE_CHUNKS = 3
+POST_TTS_DELAY = 0.3
 FINAL_WAIT = 2.0
 
-MAX_UNKNOWN_RETRIES = 3
-MAX_SILENCE_RETRIES = 3
-ESCALATION_COOLDOWN = 20        # seconds
+# ================= ESCALATION / SAFETY =================
+MIN_MEANINGFUL_WORDS = 3
+MAX_UNKNOWN_BEFORE_ESCALATE = 3
+ESCALATION_AFTER_SECONDS = 30
+HUMAN_COOLDOWN_SECONDS = 40
 
 # ================= LOGGING =================
 logging.basicConfig(
@@ -547,7 +547,7 @@ log = logging.getLogger("voicebot")
 # ================= APP =================
 app = FastAPI()
 
-# ================= PITCH (2 PHASE – GUARANTEED) =================
+# ================= PITCH (2 PHASE – GUARANTEED FULL) =================
 PITCH_1 = (
     "Hi, my name is Neeraja, calling from Rupeek. "
     "You have a pre approved personal loan at zero interest."
@@ -581,7 +581,7 @@ FAQS = [
 
     (["emi", "monthly", "payment"],
      "The EMI depends on the tenure you select. "
-     "The Rupeek app shows the exact EMI amount."),
+     "The Rupeek app clearly shows the exact EMI amount."),
 
     (["processing", "fee", "pf", "gst"],
      "Zero interest applies only if you repay within the same month. "
@@ -594,7 +594,7 @@ FAQS = [
 
 # ================= INTENT =================
 def classify(text: str):
-    t = text.lower().strip()
+    t = text.lower()
 
     if any(x in t for x in ["yes", "interested", "ok", "okay", "sure"]):
         return "YES", None
@@ -606,7 +606,7 @@ def classify(text: str):
         return "PREVIOUS", None
     if "repeat" in t:
         return "REPEAT", None
-    if "done" in t or "complete" in t:
+    if "done" in t:
         return "DONE", None
 
     for keys, _ in FAQS:
@@ -615,23 +615,25 @@ def classify(text: str):
 
     return "UNKNOWN", None
 
-# ================= SPEECH FILTER =================
-def meaningful_speech(text: str, intent: str) -> bool:
-    if intent != "UNKNOWN":
-        return True
-
+def meaningful_speech(text: str) -> bool:
     words = text.strip().split()
-    if len(words) < 2:
+    if len(words) < MIN_MEANINGFUL_WORDS:
         return False
 
-    junk = {"hello", "hi", "cool", "okay", "hmm", "people"}
-    return not all(w.lower() in junk for w in words)
+    fillers = {
+        "and", "so", "ok", "okay", "hmm", "uh", "um",
+        "what", "that", "this", "cool", "net"
+    }
 
-# ================= AUDIO UTILS =================
+    meaningful = [w for w in words if w.lower() not in fillers]
+    return len(meaningful) >= 2
+
+# ================= AUDIO =================
 def is_speech(pcm: bytes) -> bool:
     energy = sum(abs(int.from_bytes(pcm[i:i+2], "little", signed=True))
                  for i in range(0, len(pcm)-1, 2))
-    return (energy / max(len(pcm)//2, 1)) > SPEECH_THRESHOLD
+    avg = energy / max(len(pcm)//2, 1)
+    return avg > SPEECH_THRESHOLD
 
 def pcm_to_wav(pcm: bytes) -> bytes:
     buf = io.BytesIO()
@@ -639,7 +641,7 @@ def pcm_to_wav(pcm: bytes) -> bytes:
     buf.write(struct.pack("<I", 36 + len(pcm)))
     buf.write(b"WAVEfmt ")
     buf.write(struct.pack("<IHHIIHH", 16, 1, 1, SAMPLE_RATE,
-                           SAMPLE_RATE * 2, 2, 16))
+                           SAMPLE_RATE*2, 2, 16))
     buf.write(b"data")
     buf.write(struct.pack("<I", len(pcm)))
     buf.write(pcm)
@@ -659,7 +661,7 @@ def stt_safe(pcm: bytes) -> str:
             return ""
         return r.json().get("transcript", "").strip()
     except Exception as e:
-        log.error(f"❌ STT error: {e}")
+        log.error(f"STT failed: {e}")
         return ""
 
 def tts(text: str) -> bytes:
@@ -680,8 +682,8 @@ def tts(text: str) -> bytes:
     return base64.b64decode(r.json()["audios"][0])
 
 async def speak(ws, text, session):
-    session["bot_speaking"] = True
     log.info(f"🗣 BOT → {text[:80]}...")
+    session["bot_speaking"] = True
     pcm = await asyncio.to_thread(tts, text)
     for i in range(0, len(pcm), MIN_CHUNK_SIZE):
         await ws.send_text(json.dumps({
@@ -691,22 +693,23 @@ async def speak(ws, text, session):
     await asyncio.sleep(POST_TTS_DELAY)
     session["bot_speaking"] = False
 
-# ================= WEBSOCKET =================
+# ================= WS =================
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
     await ws.accept()
     sid = str(time.time())
-    log.info(f"🎧 Call connected | {sid}")
 
     session = {
         "phase": "PITCH",
         "step": 0,
         "started": False,
         "bot_speaking": False,
-        "unknown": 0,
-        "silence": 0,
-        "last_escalation": 0
+        "unknown_count": 0,
+        "human_offered_at": 0,
+        "start_time": time.time()
     }
+
+    log.info(f"🎧 Call connected | {sid}")
 
     buf, speech = b"", b""
     silence, speech_chunks = 0, 0
@@ -719,7 +722,6 @@ async def ws_handler(ws: WebSocket):
 
             data = json.loads(msg["text"])
 
-            # ---- START ----
             if data.get("event") == "start" and not session["started"]:
                 await speak(ws, PITCH_1, session)
                 await speak(ws, PITCH_2, session)
@@ -751,40 +753,30 @@ async def ws_handler(ws: WebSocket):
             speech, speech_chunks, silence = b"", 0, 0
 
             if not text:
-                session["silence"] += 1
-                log.info("🔇 Silence detected")
-                if session["silence"] > MAX_SILENCE_RETRIES:
-                    now = time.time()
-                    if now - session["last_escalation"] > ESCALATION_COOLDOWN:
-                        await speak(ws,
-                            "I am having difficulty hearing you. "
-                            "Would you like me to connect you to a representative?",
-                            session)
-                        session["last_escalation"] = now
+                continue
+
+            log.info(f"🗣 USER → {text}")
+
+            if not meaningful_speech(text):
                 continue
 
             intent, meta = classify(text)
-            log.info(f"🗣 USER → {text} | intent={intent}")
+            log.info(f"🎯 intent={intent}")
 
-            if not meaningful_speech(text, intent):
-                continue
+            session["unknown_count"] = 0 if intent != "UNKNOWN" else session["unknown_count"] + 1
 
-            session["silence"] = 0
-
-            # ---- PITCH ----
+            # ---------- PITCH ----------
             if session["phase"] == "PITCH":
                 if intent == "YES":
                     session["phase"] = "STEPS"
                     await speak(ws, STEPS[0], session)
-                    continue
-                if intent == "NO":
+                elif intent == "NO":
                     await speak(ws, "Thank you for your time. Have a great day.", session)
                     await asyncio.sleep(FINAL_WAIT)
                     break
-                await speak(ws, "Please say yes if interested or no to decline.", session)
                 continue
 
-            # ---- FAQ ----
+            # ---------- FAQ ----------
             if intent == "FAQ":
                 for keys, ans in FAQS:
                     if keys == meta:
@@ -793,37 +785,46 @@ async def ws_handler(ws: WebSocket):
                         break
                 continue
 
-            # ---- STEPS ----
+            # ---------- STEPS ----------
             if intent == "NEXT":
                 session["step"] += 1
-            elif intent == "PREVIOUS":
-                session["step"] = max(0, session["step"] - 1)
-            elif intent == "REPEAT":
-                pass
-            elif intent == "DONE":
-                await speak(ws, "Thank you. Your request is complete.", session)
-                await asyncio.sleep(FINAL_WAIT)
-                break
-            else:
-                session["unknown"] += 1
-                if session["unknown"] >= MAX_UNKNOWN_RETRIES:
-                    now = time.time()
-                    if now - session["last_escalation"] > ESCALATION_COOLDOWN:
-                        await speak(ws,
-                            "Would you like me to connect you to a representative for assistance?",
-                            session)
-                        session["last_escalation"] = now
+                if session["step"] >= len(STEPS):
+                    await speak(ws, "Your process is complete. Thank you.", session)
+                    await asyncio.sleep(FINAL_WAIT)
+                    break
+                await speak(ws, STEPS[session["step"]], session)
                 continue
 
-            if session["step"] >= len(STEPS):
-                await speak(ws, "Your process is complete. Thank you.", session)
+            if intent == "PREVIOUS":
+                session["step"] = max(0, session["step"] - 1)
+                await speak(ws, STEPS[session["step"]], session)
+                continue
+
+            if intent == "REPEAT":
+                await speak(ws, STEPS[session["step"]], session)
+                continue
+
+            if intent == "DONE":
+                await speak(ws, "Thank you. Our representative will assist you if needed.", session)
                 await asyncio.sleep(FINAL_WAIT)
                 break
 
-            await speak(ws, STEPS[session["step"]], session)
+            # ---------- HUMAN ESCALATION ----------
+            elapsed = time.time() - session["start_time"]
+            if (
+                session["unknown_count"] >= MAX_UNKNOWN_BEFORE_ESCALATE
+                and elapsed > ESCALATION_AFTER_SECONDS
+                and time.time() - session["human_offered_at"] > HUMAN_COOLDOWN_SECONDS
+            ):
+                await speak(
+                    ws,
+                    "I may not be able to assist properly. Would you like me to connect you to a representative?",
+                    session
+                )
+                session["human_offered_at"] = time.time()
 
     except WebSocketDisconnect:
-        log.info("🔌 Call disconnected")
+        log.info(f"🔌 Call disconnected | {sid}")
 
 # ================= START =================
 if __name__ == "__main__":
