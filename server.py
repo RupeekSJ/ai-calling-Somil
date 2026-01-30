@@ -509,6 +509,9 @@
 # # ==================================================
 # if __name__ == "__main__":
 #     uvicorn.run(app, host="0.0.0.0", port=PORT)
+
+
+
 import os, json, asyncio, logging, sys, base64, requests, io, struct, time
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -529,8 +532,11 @@ SILENCE_CHUNKS = 3
 POST_TTS_DELAY = 0.3
 FINAL_WAIT = 2.0
 
+# ================= BEHAVIOR LIMITS =================
 MAX_EMPTY_STT = 3
 MAX_FAILS = 3
+LISTEN_WINDOW_SECONDS = 12
+HUMAN_COOLDOWN_SECONDS = 20
 
 # ================= LOGGING =================
 logging.basicConfig(
@@ -566,27 +572,11 @@ STEPS = [
 
 # ================= FAQS =================
 FAQS = [
-    (["loan", "amount", "eligible", "limit", "approved"],
-     "The loan amount is personalized for each customer. You can check your approved limit in the Rupeek app under Click Cash."),
-
-    (["roi", "interest", "miss", "late", "repayment"],
-     "If the loan repayment is missed, the loan converts to EMI with interest as shown in the app."),
-
-    (["zero", "0", "really"],
-     "Yes, there will be no interest if you repay before the month end."),
-
-    (["emi", "monthly", "payment"],
-     "The EMI depends on the tenure you select. The Rupeek app shows the exact EMI amount."),
-
-    (["processing", "fee", "pf", "gst"],
-     "Zero interest applies only if you repay within the same month. "
-     "The processing fee is a one time charge for instant digital disbursal."),
-
-    (["two", "lakh", "30000", "reduced"],
-     "Currently your eligible amount is thirty thousand rupees. "
-     "With timely repayments, your eligibility increases automatically.")
+    (["emi"], "The EMI depends on the tenure you select. The Rupeek app shows the exact EMI amount."),
+    (["interest", "roi", "late"], "If repayment is missed, the loan converts to EMI with interest as shown in the app."),
+    (["limit", "amount", "eligible"], "Your approved loan amount is visible in the Rupeek app under Click Cash."),
+    (["processing", "fee", "pf"], "The processing fee is a one time charge for instant digital disbursal.")
 ]
-
 
 # ================= INTENT =================
 def classify(text):
@@ -607,6 +597,13 @@ def classify(text):
         if any(k in t for k in keys):
             return "FAQ", keys
     return "UNKNOWN", None
+
+def meaningful_speech(text: str) -> bool:
+    words = text.strip().split()
+    if len(words) < 2:
+        return False
+    junk = ["cool", "hello", "hi", "okay", "hmm"]
+    return not all(w.lower() in junk for w in words)
 
 # ================= AUDIO =================
 def is_speech(pcm):
@@ -639,7 +636,8 @@ def stt_safe(pcm):
         if r.status_code != 200:
             return ""
         return r.json().get("transcript", "").strip()
-    except Exception:
+    except Exception as e:
+        log.error(f"STT error: {e}")
         return ""
 
 def tts(text):
@@ -660,6 +658,7 @@ def tts(text):
     return base64.b64decode(r.json()["audios"][0])
 
 async def speak(ws, text, session):
+    log.info(f"🤖 BOT → {text}")
     session["bot_speaking"] = True
     pcm = await asyncio.to_thread(tts, text)
     for i in range(0, len(pcm), MIN_CHUNK_SIZE):
@@ -674,6 +673,8 @@ async def speak(ws, text, session):
 @app.websocket("/ws")
 async def ws_handler(ws: WebSocket):
     await ws.accept()
+    log.info("🎧 Call connected")
+
     session = {
         "phase": "PITCH",
         "step": 0,
@@ -681,7 +682,8 @@ async def ws_handler(ws: WebSocket):
         "bot_speaking": False,
         "empty_count": 0,
         "fail_count": 0,
-        "human_offered": False
+        "human_offered_at": 0,
+        "listen_start": time.time()
     }
 
     buf, speech = b"", b""
@@ -725,30 +727,20 @@ async def ws_handler(ws: WebSocket):
             text = await asyncio.to_thread(stt_safe, speech)
             speech, speech_chunks, silence = b"", 0, 0
 
-            if not text:
-                session["empty_count"] += 1
-                if session["empty_count"] >= MAX_EMPTY_STT:
-                    await speak(ws, "I am having trouble hearing you clearly. Would you like me to connect you to a representative?", session)
-                    session["human_offered"] = True
+            if not text or not meaningful_speech(text):
+                log.info("🔈 Noise / insignificant speech — continuing to listen")
                 continue
 
-            session["empty_count"] = 0
             log.info(f"🗣 User said: {text}")
-
             intent, meta = classify(text)
 
-            if session["human_offered"] and intent == "YES":
-                await speak(ws, "Please hold while I connect you to our representative.", session)
-                await asyncio.sleep(FINAL_WAIT)
-                break
+            now = time.time()
 
             if intent == "UNKNOWN":
                 session["fail_count"] += 1
-                if session["fail_count"] >= MAX_FAILS:
-                    await speak(ws, "Would you like to speak to a representative for further help?", session)
-                    session["human_offered"] = True
-                else:
-                    await speak(ws, "Sorry, I did not understand. You can say next, repeat, or done.", session)
+                if session["fail_count"] >= MAX_FAILS and now - session["human_offered_at"] > HUMAN_COOLDOWN_SECONDS:
+                    await speak(ws, "I can connect you to a representative if you need help. Would you like that?", session)
+                    session["human_offered_at"] = now
                 continue
 
             session["fail_count"] = 0
