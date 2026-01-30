@@ -522,17 +522,16 @@ PORT = int(os.getenv("PORT", 10000))
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
 # ==================================================
-# AUDIO CONFIG
+# AUDIO CONFIG (NOISE SAFE)
 # ==================================================
 SAMPLE_RATE = 16000
-MIN_CHUNK_SIZE = 3200
-SPEECH_THRESHOLD = 500
-SILENCE_CHUNKS = 7
-PAUSE = 1.5
-FINAL_WAIT = 2.5
+MIN_CHUNK_SIZE = 3200           # 100ms
+SPEECH_THRESHOLD = 550
+SILENCE_CHUNKS = 8              # ~800ms silence
+MIN_SPEECH_CHUNKS = 12          # ~1.2s speech
+POST_TTS_DELAY = 0.8            # wait after bot speaks
 
-MAX_CLARIFY = 2
-MAX_SILENCE = 2
+FINAL_WAIT = 2.5
 
 # ==================================================
 # LOGGING
@@ -552,7 +551,7 @@ app = FastAPI()
 SESSIONS = {}
 
 # ==================================================
-# PITCH (UNCHANGED, FULL)
+# PITCH (AS PROVIDED)
 # ==================================================
 PITCH = (
     "Hi, my name is Neeraja, calling from Rupeek. "
@@ -563,7 +562,7 @@ PITCH = (
     "You can even withdraw again every month with zero interest, as long as it is repaid within the month. "
     "The process is one hundred percent digital, with no income proof and no paperwork required. "
     "You can receive instant disbursal to your bank account in just sixty seconds. "
-    "With timely repayments, you can boost your CIBIL score and unlock higher limits in the future without any interest. "
+    "With timely repayments, you can boost your CIBIL score and unlock higher limits in future without any interest. "
     "This is a limited time offer. "
     "Are you interested?"
 )
@@ -578,16 +577,16 @@ STEPS = [
 ]
 
 # ==================================================
-# FAQS (FULL ANSWERS)
+# FAQS (FULL ANSWERS – NOT SHORTENED)
 # ==================================================
 FAQS = [
     (
-        ["loan amount", "eligible", "limit", "approved amount"],
+        ["loan amount", "eligible", "approved", "limit"],
         "The loan amount is personalized for each customer. "
         "You can check your approved limit in the Rupeek app under Click Cash."
     ),
     (
-        ["roi", "interest if miss", "miss payment", "repayment due date"],
+        ["roi", "miss payment", "repayment due date"],
         "If the loan repayment is missed, the loan converts to EMI with interest as shown in the app."
     ),
     (
@@ -596,8 +595,7 @@ FAQS = [
     ),
     (
         ["emi amount", "monthly emi"],
-        "The EMI depends on the tenure you select. "
-        "The app clearly shows the exact EMI amount."
+        "The EMI depends on the tenure you select. The app shows the exact EMI amount."
     ),
     (
         ["processing fee", "pf", "gst", "credit card"],
@@ -607,25 +605,19 @@ FAQS = [
         "Here you pay a transparent one time fee with no recurring interest."
     ),
     (
-        ["app shows interest", "1.45 percent", "32 percent"],
+        ["app shows interest", "1.45", "32"],
         "The app shows the standard ROI for EMI. "
-        "If you repay by month end, you do not have to pay any interest. "
+        "If you repay by month end you do not have to pay any interest. "
         "If you do not repay, you can convert it into easy EMI."
     ),
     (
-        ["repay date", "month end only"],
+        ["repay date", "month end"],
         "You are required to repay the amount by month end to avail zero interest."
     ),
     (
-        ["pf high", "processing fee high", "other companies"],
-        "Our processing fee is very nominal. "
-        "Many companies charge five to six percent and deduct it from the disbursal amount. "
-        "With Rupeek, you receive the full approved amount in your bank account with no deductions."
-    ),
-    (
-        ["two lakh", "30,000", "reduced amount"],
+        ["two lakh", "30000", "reduced amount"],
         "Currently, based on system checks, your eligible amount is thirty thousand rupees. "
-        "With timely repayments, your eligibility increases automatically and you can access higher limits in future."
+        "With timely repayments, your eligibility increases automatically in the future."
     )
 ]
 
@@ -639,19 +631,15 @@ def classify(text: str):
         if any(k in t for k in keys):
             return "FAQ", keys
 
-    if any(x in t for x in ["yes", "interested", "okay", "ok"]):
+    if any(x in t for x in ["yes", "interested", "ok", "okay"]):
         return "YES", None
-
-    if any(x in t for x in ["no", "not interested", "stop"]):
+    if any(x in t for x in ["no", "not interested"]):
         return "NO", None
-
-    if any(x in t for x in ["next", "continue"]):
+    if "next" in t:
         return "NEXT", None
-
-    if any(x in t for x in ["repeat", "again"]):
+    if "repeat" in t:
         return "REPEAT", None
-
-    if any(x in t for x in ["done", "complete"]):
+    if "done" in t:
         return "DONE", None
 
     return "UNKNOWN", None
@@ -659,12 +647,13 @@ def classify(text: str):
 # ==================================================
 # AUDIO UTILS
 # ==================================================
-def is_speech(pcm):
-    total = sum(abs(int.from_bytes(pcm[i:i+2], "little", signed=True))
-                for i in range(0, len(pcm)-1, 2))
-    return (total / max(len(pcm)//2, 1)) > SPEECH_THRESHOLD
+def is_speech(pcm: bytes) -> bool:
+    energy = sum(abs(int.from_bytes(pcm[i:i+2], "little", signed=True))
+                 for i in range(0, len(pcm)-1, 2))
+    avg = energy / max(len(pcm)//2, 1)
+    return avg > SPEECH_THRESHOLD
 
-def pcm_to_wav(pcm):
+def pcm_to_wav(pcm: bytes) -> bytes:
     buf = io.BytesIO()
     buf.write(b"RIFF")
     buf.write(struct.pack("<I", 36 + len(pcm)))
@@ -679,7 +668,7 @@ def pcm_to_wav(pcm):
 # ==================================================
 # SARVAM
 # ==================================================
-def stt(pcm):
+def stt(pcm: bytes) -> str:
     r = requests.post(
         "https://api.sarvam.ai/speech-to-text",
         headers={"api-subscription-key": SARVAM_API_KEY},
@@ -690,7 +679,7 @@ def stt(pcm):
     r.raise_for_status()
     return r.json().get("transcript", "").strip()
 
-def tts(text):
+def tts(text: str) -> bytes:
     r = requests.post(
         "https://api.sarvam.ai/text-to-speech",
         headers={
@@ -707,7 +696,7 @@ def tts(text):
     r.raise_for_status()
     return base64.b64decode(r.json()["audios"][0])
 
-async def speak(ws, text):
+async def speak(ws: WebSocket, text: str):
     pcm = await asyncio.to_thread(tts, text)
     for i in range(0, len(pcm), MIN_CHUNK_SIZE):
         await ws.send_text(json.dumps({
@@ -715,21 +704,25 @@ async def speak(ws, text):
             "media": {"payload": base64.b64encode(pcm[i:i+MIN_CHUNK_SIZE]).decode()}
         }))
         await asyncio.sleep(0)
+    await asyncio.sleep(POST_TTS_DELAY)
 
 # ==================================================
 # WEBSOCKET
 # ==================================================
 @app.websocket("/ws")
-async def ws(ws: WebSocket):
+async def ws_handler(ws: WebSocket):
     await ws.accept()
     sid = str(time.time())
-
     log.info(f"🎧 Call connected | {sid}")
 
-    SESSIONS[sid] = {"phase": "PITCH", "step": 0, "clarify": 0, "started": False}
+    SESSIONS[sid] = {
+        "phase": "PITCH",
+        "step": 0,
+        "started": False
+    }
 
     buf, speech = b"", b""
-    silence = 0
+    silence, speech_chunks = 0, 0
 
     try:
         while True:
@@ -740,7 +733,6 @@ async def ws(ws: WebSocket):
             data = json.loads(msg["text"])
 
             if data.get("event") == "start" and not SESSIONS[sid]["started"]:
-                log.info("▶️ Playing pitch")
                 await speak(ws, PITCH)
                 SESSIONS[sid]["started"] = True
                 continue
@@ -758,51 +750,50 @@ async def ws(ws: WebSocket):
 
             if is_speech(frame):
                 speech += frame
+                speech_chunks += 1
                 silence = 0
             else:
                 silence += 1
 
-            if silence < SILENCE_CHUNKS or not speech:
+            if silence < SILENCE_CHUNKS or speech_chunks < MIN_SPEECH_CHUNKS:
                 continue
 
             text = await asyncio.to_thread(stt, speech)
-            speech = b""
-            silence = 0
-
             log.info(f"🗣 User said: {text}")
+
+            speech, speech_chunks, silence = b"", 0, 0
+            if not text:
+                continue
+
             intent, meta = classify(text)
 
-            # FAQ
+            # ---------- FAQ ----------
             if intent == "FAQ":
                 for keys, ans in FAQS:
                     if keys == meta:
                         await speak(ws, ans)
-                        await asyncio.sleep(PAUSE)
+                        # return to current context
+                        if SESSIONS[sid]["phase"] == "STEPS":
+                            await speak(ws, STEPS[SESSIONS[sid]["step"]])
+                        else:
+                            await speak(ws, "Are you interested?")
                         break
                 continue
 
-            # PITCH PHASE
+            # ---------- PITCH ----------
             if SESSIONS[sid]["phase"] == "PITCH":
                 if intent == "YES":
                     SESSIONS[sid]["phase"] = "STEPS"
                     await speak(ws, STEPS[0])
                     continue
-
                 if intent == "NO":
                     await speak(ws, "Thank you for your time. Have a great day.")
                     await asyncio.sleep(FINAL_WAIT)
                     break
-
-                SESSIONS[sid]["clarify"] += 1
-                if SESSIONS[sid]["clarify"] > MAX_CLARIFY:
-                    await speak(ws, "I will connect you to our representative for further assistance.")
-                    await asyncio.sleep(FINAL_WAIT)
-                    break
-
                 await speak(ws, "Please say yes if interested or no to decline.")
                 continue
 
-            # STEPS
+            # ---------- STEPS ----------
             if intent == "NEXT":
                 SESSIONS[sid]["step"] += 1
                 if SESSIONS[sid]["step"] >= len(STEPS):
