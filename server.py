@@ -563,8 +563,7 @@ PITCH = (
     "The process is one hundred percent digital, with no income proof and no paperwork required. "
     "You can receive instant disbursal to your bank account in just sixty seconds. "
     "With timely repayments, you can boost your CIBIL score and unlock higher limits in future without any interest. "
-    "This is a limited time offer. "
-    "Are you interested?"
+    "This is a limited time offer. Are you interested?"
 )
 
 # ==================================================
